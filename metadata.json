@@ -1,0 +1,6 @@
+{
+  "name": "Local AI Task Executor",
+  "description": "一个用于本地自动化任务的、模型无关、可审计的可复现 AI 任务执行器。",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
