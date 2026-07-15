@@ -478,7 +478,7 @@ export default function LiveLogs({ task, onQuickRetry }: LiveLogsProps) {
             <h2 className="font-mono text-[10px] uppercase font-bold tracking-widest text-slate-400">Agent Execution Chain (审计日志)</h2>
           </div>
           <p className="text-[10px] text-slate-500 font-mono">
-            ID: {task.id.slice(0, 8)} | MODEL: {task.model} | TEMP: {task.temperature}
+            ID: {task.id?.slice(0, 8) || "N/A"} | MODEL: {task.model || task.parameters?.model || "N/A"} | TEMP: {task.temperature ?? task.parameters?.temperature ?? "N/A"}
           </p>
         </div>
         

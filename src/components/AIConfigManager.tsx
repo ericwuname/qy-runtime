@@ -29,6 +29,7 @@ export default function AIConfigManager({ onConfigChanged }: AIConfigManagerProp
   const [saving, setSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [deletingProviderKey, setDeletingProviderKey] = useState<string | null>(null);
 
   const [fetchingModels, setFetchingModels] = useState<Record<string, boolean>>({});
   const [fetchError, setFetchError] = useState<Record<string, string | null>>({});
@@ -69,9 +70,20 @@ export default function AIConfigManager({ onConfigChanged }: AIConfigManagerProp
   const handleRunDiagnose = async (providerKey: string) => {
     if (!config) return;
     const pConfig = config.providers[providerKey];
-    if (!pConfig || !pConfig.baseURL) {
-      setDiagnoseError(prev => ({ ...prev, [providerKey]: "需要提供 Base URL 才能进行网络诊断" }));
-      return;
+    if (!pConfig) return;
+
+    let targetURL = pConfig.baseURL;
+    if (!targetURL) {
+      if (providerKey === "gemini") {
+        targetURL = "https://generativelanguage.googleapis.com";
+      } else if (providerKey === "anthropic") {
+        targetURL = "https://api.anthropic.com";
+      } else if (providerKey === "openai") {
+        targetURL = "https://api.openai.com/v1";
+      } else {
+        setDiagnoseError(prev => ({ ...prev, [providerKey]: "需要提供 Base URL 才能进行网络诊断" }));
+        return;
+      }
     }
 
     setDiagnosing(prev => ({ ...prev, [providerKey]: true }));
@@ -82,7 +94,7 @@ export default function AIConfigManager({ onConfigChanged }: AIConfigManagerProp
       const res = await fetch("/api/config/diagnose", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ baseURL: pConfig.baseURL })
+        body: JSON.stringify({ baseURL: targetURL, provider: providerKey })
       });
       if (!res.ok) {
         throw new Error(`服务器响应失败: HTTP ${res.status}`);
@@ -262,15 +274,23 @@ export default function AIConfigManager({ onConfigChanged }: AIConfigManagerProp
   const handleDeleteCustomProvider = async (providerKey: string) => {
     if (!config) return;
     
-    const defaultKeys = ["gemini", "openai", "anthropic", "agnes", "local_llm"];
+    const defaultKeys = ["gemini", "openai", "anthropic", "local_llm"];
     if (defaultKeys.includes(providerKey)) {
-      alert("默认自带供应商不可删除");
+      setError("默认自带供应商不可删除");
       return;
     }
 
-    if (!confirm(`确定要彻底删除自定义模型供应商 "${config.providers[providerKey]?.name || providerKey}" 吗？`)) {
+    if (deletingProviderKey !== providerKey) {
+      setDeletingProviderKey(providerKey);
+      // Auto cancel after 6 seconds if not clicked again
+      setTimeout(() => {
+        setDeletingProviderKey(prev => prev === providerKey ? null : prev);
+      }, 6000);
       return;
     }
+
+    // Reset state before delete
+    setDeletingProviderKey(null);
 
     const { [providerKey]: deleted, ...remainingProviders } = config.providers;
     
@@ -530,15 +550,15 @@ export default function AIConfigManager({ onConfigChanged }: AIConfigManagerProp
     });
   }
 
-  const systemProvidersList = providersList.filter(p => ["gemini", "openai", "anthropic", "agnes", "local_llm"].includes(p.key));
-  const customProvidersList = providersList.filter(p => !["gemini", "openai", "anthropic", "agnes", "local_llm"].includes(p.key));
+  const systemProvidersList = providersList.filter(p => ["gemini", "openai", "anthropic", "local_llm"].includes(p.key));
+  const customProvidersList = providersList.filter(p => !["gemini", "openai", "anthropic", "local_llm"].includes(p.key));
 
   const renderProviderPanel = (p: typeof providersList[0]) => {
     const pConfig = config.providers[p.key];
     if (!pConfig) return null;
     const isActive = config.activeProvider === p.key;
     const isExpanded = !!expandedProviders[p.key];
-    const isDefaultProvider = ["gemini", "openai", "anthropic", "agnes", "local_llm"].includes(p.key);
+    const isDefaultProvider = ["gemini", "openai", "anthropic", "local_llm"].includes(p.key);
 
     return (
       <div 
@@ -667,10 +687,15 @@ export default function AIConfigManager({ onConfigChanged }: AIConfigManagerProp
               <button
                 type="button"
                 onClick={() => handleDeleteCustomProvider(p.key)}
-                title="删除该自定义模型供应商"
-                className="p-1 bg-rose-950/20 hover:bg-rose-900/40 border border-rose-900/40 text-rose-400 hover:text-rose-300 rounded transition-all focus:outline-none"
+                title={deletingProviderKey === p.key ? "点击第二次以确认彻底删除" : "删除该自定义模型供应商"}
+                className={`px-2 py-1 text-[10px] font-mono font-semibold rounded border transition-all focus:outline-none flex items-center gap-1.5 ${
+                  deletingProviderKey === p.key
+                    ? "bg-rose-600 border-rose-500 text-white animate-pulse"
+                    : "p-1 bg-rose-950/20 hover:bg-rose-900/40 border border-rose-900/40 text-rose-400 hover:text-rose-300"
+                }`}
               >
-                <Trash2 className="w-3.5 h-3.5 text-rose-500" />
+                <Trash2 className={`w-3.5 h-3.5 shrink-0 ${deletingProviderKey === p.key ? "text-white" : "text-rose-500"}`} />
+                {deletingProviderKey === p.key && <span>CONFIRM (确认)</span>}
               </button>
             )}
           </div>

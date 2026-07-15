@@ -295,13 +295,21 @@ export function formatExecutionLog(task: Task): string {
 interface ErrorAnalyzerProps {
   tasks?: Task[];
   selectedTaskId?: string | null;
+  aiConfig?: any;
 }
 
-export default function ErrorAnalyzer({ tasks = [], selectedTaskId = null }: ErrorAnalyzerProps) {
+export default function ErrorAnalyzer({ tasks = [], selectedTaskId = null, aiConfig = null }: ErrorAnalyzerProps) {
   const [subTab, setSubTab] = useState<"repository" | "paste">("repository");
   const [errorLog, setErrorLog] = useState("");
   const [activeTaskId, setActiveTaskId] = useState<string | null>(selectedTaskId);
   const [searchTerm, setSearchTerm] = useState("");
+
+  const activeModelDisplay = useMemo(() => {
+    if (!aiConfig) return "Active Model Pool";
+    const provider = aiConfig.activeProvider || "gemini";
+    const model = aiConfig.activeModel || "gemini-3.5-flash";
+    return `${provider.toUpperCase()} - ${model}`;
+  }, [aiConfig]);
 
   // Sync with selectedTaskId prop if it changes
   useEffect(() => {
@@ -782,7 +790,7 @@ Cannot read properties of undefined (reading 'map')`}
                       <div className="flex items-center gap-1.5">
                         <Sparkles className="w-4 h-4 text-indigo-400 animate-pulse" />
                         <span className="text-[11px] uppercase font-mono font-bold tracking-wider text-slate-300">
-                          AI 智能诊疗与一键修复建议 (Gemini Core)
+                          AI 智能诊疗与一键修复建议 ({activeModelDisplay})
                         </span>
                       </div>
                       <button

@@ -5,6 +5,7 @@ import LiveLogs from "./components/LiveLogs";
 import WorkspaceManager from "./components/WorkspaceManager";
 import AIConfigManager from "./components/AIConfigManager";
 import ErrorAnalyzer from "./components/ErrorAnalyzer";
+import ErrorBoundary from "./components/ErrorBoundary";
 import { 
   Cpu, 
   Terminal, 
@@ -71,6 +72,23 @@ export default function App() {
     message: string;
   } | null>(null);
 
+  const [localMirrorTasks, setLocalMirrorTasks] = useState<Task[]>([]);
+
+  // Load mirror tasks on start
+  useEffect(() => {
+    try {
+      const cached = localStorage.getItem("qiyuan_tasks_mirror");
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          setLocalMirrorTasks(parsed);
+        }
+      }
+    } catch (err) {
+      console.error("Failed to load local tasks mirror:", err);
+    }
+  }, []);
+
   // Load all tasks
   const loadTasks = async () => {
     try {
@@ -93,6 +111,39 @@ export default function App() {
   useEffect(() => {
     loadTasks();
   }, []);
+
+  // Local mirror synchronization logic
+  useEffect(() => {
+    if (tasks && tasks.length > 0) {
+      // Only mirror if there is some real progress or custom task (so we don't overwrite with freshly-reset templates)
+      const hasRealWork = tasks.length > 2 || tasks.some(t => t.executionStatus !== "pending" && t.logs && t.logs.length > 1);
+      if (hasRealWork) {
+        localStorage.setItem("qiyuan_tasks_mirror", JSON.stringify(tasks));
+        setLocalMirrorTasks(tasks);
+      }
+    }
+  }, [tasks]);
+
+  // Bulk restore from local mirror
+  const handleRestoreFromLocalMirror = async () => {
+    if (localMirrorTasks.length === 0) return;
+    try {
+      const res = await fetch("/api/backup/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tasks: localMirrorTasks })
+      });
+      if (res.ok) {
+        showNotification("从本地浏览器缓存成功恢复所有历史执行任务！", "success");
+        await loadTasks();
+      } else {
+        const err = await res.json();
+        showNotification(err.error || "导入失败", "error");
+      }
+    } catch (err) {
+      showNotification("恢复操作遇到网络异常", "error");
+    }
+  };
 
   useEffect(() => {
     const isAnyRunning = tasks.some(t => (t.executionStatus || t.status) === "running");
@@ -392,23 +443,29 @@ export default function App() {
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 h-full">
               {/* Task list sidebar */}
               <div className="lg:col-span-3 h-full overflow-hidden">
-                <TaskQueue
-                  tasks={tasks}
-                  selectedTaskId={selectedTaskId}
-                  onSelectTask={(id) => setSelectedTaskId(id)}
-                  onCreateTask={handleCreateTask}
-                  onDeleteTask={handleDeleteTask}
-                  onRunTask={handleRunTask}
-                  onResumeTask={handleResumeTask}
-                  onResetTask={handleResetTask}
-                  isRunningAny={pollingActive}
-                  aiConfig={aiConfig}
-                />
+                <ErrorBoundary fallbackTitle="TASK QUEUE FAULT (任务队列故障)">
+                  <TaskQueue
+                    tasks={tasks}
+                    selectedTaskId={selectedTaskId}
+                    onSelectTask={(id) => setSelectedTaskId(id)}
+                    onCreateTask={handleCreateTask}
+                    onDeleteTask={handleDeleteTask}
+                    onRunTask={handleRunTask}
+                    onResumeTask={handleResumeTask}
+                    onResetTask={handleResetTask}
+                    isRunningAny={pollingActive}
+                    aiConfig={aiConfig}
+                    localMirrorTasks={localMirrorTasks}
+                    onRestoreFromLocalMirror={handleRestoreFromLocalMirror}
+                  />
+                </ErrorBoundary>
               </div>
 
               {/* Execution console */}
               <div className="lg:col-span-6 h-full overflow-hidden">
-                <LiveLogs task={selectedTask} onQuickRetry={handleQuickRetry} />
+                <ErrorBoundary fallbackTitle="EXECUTION CHAIN LOGS FAULT (审计日志监控故障)">
+                  <LiveLogs task={selectedTask} onQuickRetry={handleQuickRetry} />
+                </ErrorBoundary>
               </div>
 
               {/* Right Sidebar: Resources & Sandbox context */}
@@ -535,15 +592,21 @@ export default function App() {
             </div>
           ) : activeTab === "workspace" ? (
             <div className="h-full">
-              <WorkspaceManager />
+              <ErrorBoundary fallbackTitle="WORKSPACE MANAGER FAULT (工作区管理器故障)">
+                <WorkspaceManager />
+              </ErrorBoundary>
             </div>
           ) : activeTab === "config" ? (
             <div className="h-full">
-              <AIConfigManager onConfigChanged={loadAIConfig} />
+              <ErrorBoundary fallbackTitle="MODEL POOL CONFIG FAULT (模型池配置故障)">
+                <AIConfigManager onConfigChanged={loadAIConfig} />
+              </ErrorBoundary>
             </div>
           ) : (
             <div className="h-full">
-              <ErrorAnalyzer tasks={tasks} selectedTaskId={selectedTaskId} />
+              <ErrorBoundary fallbackTitle="ERROR ANALYZER FAULT (报错解析器故障)">
+                <ErrorAnalyzer tasks={tasks} selectedTaskId={selectedTaskId} aiConfig={aiConfig} />
+              </ErrorBoundary>
             </div>
           )}
         </div>
