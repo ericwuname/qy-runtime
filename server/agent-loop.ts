@@ -6,8 +6,18 @@ import { loadAIConfig } from "./config";
 import { saveTasks, getWorkspaceFileMtimes } from "./persistence";
 import { callAIProvider, getBackupProvider, getBackupProviders } from "./providers";
 import { executeTool, simplifyPayload } from "./tools";
+import { getRepoIndex } from "./repo-indexer";
 
 const WORKSPACE_DIR = path.resolve(process.cwd(), "workspace");
+
+function getErrorFingerprint(errorMsg: string, toolName: string): string {
+  let cleaned = errorMsg.toLowerCase();
+  cleaned = cleaned.replace(/\d+/g, ""); // strip numbers
+  cleaned = cleaned.replace(/at\s+.*?(?:\(|\n|$)/g, ""); // strip stack traces
+  cleaned = cleaned.replace(/(?:\/[a-zA-Z0-9_\.\-]+)+/g, ""); // strip paths
+  cleaned = cleaned.trim();
+  return `${toolName}::${cleaned}`;
+}
 
 export async function executeTaskBackground(task: any, activeTasks: any[]): Promise<void> {
   const startTime = Date.now();
@@ -20,6 +30,9 @@ export async function executeTaskBackground(task: any, activeTasks: any[]): Prom
   let totalTokens = 0;
   let currentStep = 1;
   let history: any[] = [];
+
+  const errorHistory: { fingerprint: string; count: number }[] = [];
+  let selfHealingAttempts = 0;
 
   // Load configuration and model names
   const currentConfig = loadAIConfig();
@@ -46,7 +59,21 @@ export async function executeTaskBackground(task: any, activeTasks: any[]): Prom
       extraInstructions += `\n\n[核心原则与执行红线 (core_principles.md)]\n${fs.readFileSync(cpPath, "utf-8")}`;
     }
 
-    const finalSystemInstruction = (task.parameters?.systemInstruction || "你是一个实用的本地自动化任务助手。") + extraInstructions;
+    // Load codebase awareness (RepoIndexer)
+    let codebaseContext = "";
+    try {
+      const index = await getRepoIndex();
+      if (index && index.files && index.files.length > 0) {
+        codebaseContext += `\n\n[代码库结构感知 (Codebase Awareness)]\n当前工作区包含以下文件 (前 100 个)：\n${index.files.slice(0, 100).map((f: string) => `- ${f}`).join("\n")}`;
+        if (index.symbols && index.symbols.length > 0) {
+          codebaseContext += `\n\n代码库关键符号定义 (前 50 个)：\n${index.symbols.slice(0, 50).map((sym: any) => `- [${sym.type.toUpperCase()}] ${sym.name} (位于 ${sym.filePath}:${sym.line})`).join("\n")}`;
+        }
+      }
+    } catch (e: any) {
+      console.warn("Failed to inject codebase context into agent-loop:", e);
+    }
+
+    const finalSystemInstruction = (task.parameters?.systemInstruction || "你是一个实用的本地自动化任务助手。") + extraInstructions + codebaseContext;
 
     // Construct user prompt with context files content (F-41)
     let initialPrompt = `你现在的任务是：${task.description?.prompt || task.prompt || "无任务描述"}`;
@@ -406,6 +433,65 @@ export async function executeTaskBackground(task: any, activeTasks: any[]): Prom
             });
           } catch (err: any) {
             const errorMsg = err.message || String(err);
+            const fingerprint = getErrorFingerprint(errorMsg, name);
+            
+            // Track in error history
+            let existing = errorHistory.find(h => h.fingerprint === fingerprint);
+            if (!existing) {
+              existing = { fingerprint, count: 1 };
+              errorHistory.push(existing);
+            } else {
+              existing.count++;
+            }
+
+            // Self-healing logging and breaker checks
+            task.logs.push({
+              timestamp: new Date().toISOString(),
+              type: "system",
+              message: `[自愈引擎监控] 遭遇错误。特征指纹: "${fingerprint}"。当前特征累计发生 ${existing.count} 次。已自动重试/自我修复次数: ${selfHealingAttempts}/3`
+            });
+            saveTasks(activeTasks);
+
+            // Hard Breaker 1: Repetitive Error Breaker (原地磨损拦截)
+            if (existing.count >= 2) {
+              const breakMsg = `[自愈熔断] 拦截到重复错误指纹 ("${fingerprint}")。检测到模型陷入原地死循环。自愈引擎启动安全拦截，强行熔断任务运行以防止耗尽 API 限额或陷入无限等待。请人工介入排查。`;
+              task.logs.push({
+                timestamp: new Date().toISOString(),
+                type: "error",
+                message: breakMsg
+              });
+              
+              // Build unconfirmed hypothesis diagnostic report
+              const hypothesis = `\n\n### 🚨 [UNCONFIRMED_HYPOTHESIS / 未证实修复假设]\n根据系统自动反思，该故障（${errorMsg}）在执行工具 ${name} 时重复发生了 ${existing.count} 次。\n这极有可能是因为：\n1. 修复代码时没有考虑到前置依赖或环境状态；\n2. AI 模型未能跳出当前的决策局部最优解。\n请参考本提示，重置任务，检查代码逻辑并手动调整后再次运行。`;
+              
+              task.results.error = breakMsg + hypothesis;
+              task.executionStatus = "failed";
+              task.status = "failed";
+              task.completedAt = new Date().toISOString();
+              saveTasks(activeTasks);
+              return; // Halt background loop completely!
+            }
+
+            // Hard Breaker 2: Total Self-Healing Budget (总预算限额)
+            selfHealingAttempts++;
+            if (selfHealingAttempts > 3) {
+              const budgetBreakMsg = `[自愈熔断] 已达到该任务的最大自动自愈重试上限 (3次)。为保证运行确定性与防范死循环，系统自动将任务标记为失败。`;
+              task.logs.push({
+                timestamp: new Date().toISOString(),
+                type: "error",
+                message: budgetBreakMsg
+              });
+              
+              const hypothesis = `\n\n### 🚨 [UNCONFIRMED_HYPOTHESIS / 未证实修复假设]\n任务运行过程中累计触发了超过 3 次自我修复尝试。底层错误为：\n> ${errorMsg}\n建议点击“重置任务”清空对话历史，并在 Prompt 中加入更明确的修复约束。`;
+              
+              task.results.error = budgetBreakMsg + hypothesis;
+              task.executionStatus = "failed";
+              task.status = "failed";
+              task.completedAt = new Date().toISOString();
+              saveTasks(activeTasks);
+              return; // Halt background loop completely!
+            }
+
             const isSerializationOrProcessingError = 
               err instanceof TypeError || 
               err instanceof RangeError || 
@@ -662,9 +748,25 @@ export async function resumeTaskBackground(task: any, activeTasks: any[]): Promi
       extraInstructions += `\n\n[核心原则与执行红线 (core_principles.md)]\n${fs.readFileSync(cpPath, "utf-8")}`;
     }
 
-    const finalSystemInstruction = (task.parameters?.systemInstruction || "你是一个实用的本地自动化任务助手。") + extraInstructions;
+    // Load codebase awareness (RepoIndexer)
+    let codebaseContext = "";
+    try {
+      const index = await getRepoIndex();
+      if (index && index.files && index.files.length > 0) {
+        codebaseContext += `\n\n[代码库结构感知 (Codebase Awareness)]\n当前工作区包含以下文件 (前 100 个)：\n${index.files.slice(0, 100).map((f: string) => `- ${f}`).join("\n")}`;
+        if (index.symbols && index.symbols.length > 0) {
+          codebaseContext += `\n\n代码库关键符号定义 (前 50 个)：\n${index.symbols.slice(0, 50).map((sym: any) => `- [${sym.type.toUpperCase()}] ${sym.name} (位于 ${sym.filePath}:${sym.line})`).join("\n")}`;
+        }
+      }
+    } catch (e: any) {
+      console.warn("Failed to inject codebase context into agent-loop resume:", e);
+    }
+
+    const finalSystemInstruction = (task.parameters?.systemInstruction || "你是一个实用的本地自动化任务助手。") + extraInstructions + codebaseContext;
 
     const MAX_STEPS = 15;
+    const errorHistory: { fingerprint: string; count: number }[] = [];
+    let selfHealingAttempts = 0;
     let modelFinished = false;
     let currentProvider = providerName;
     let currentModel = modelName;
@@ -988,6 +1090,65 @@ export async function resumeTaskBackground(task: any, activeTasks: any[]): Promi
             });
           } catch (err: any) {
             const errorMsg = err.message || String(err);
+            const fingerprint = getErrorFingerprint(errorMsg, name);
+            
+            // Track in error history
+            let existing = errorHistory.find(h => h.fingerprint === fingerprint);
+            if (!existing) {
+              existing = { fingerprint, count: 1 };
+              errorHistory.push(existing);
+            } else {
+              existing.count++;
+            }
+
+            // Self-healing logging and breaker checks
+            task.logs.push({
+              timestamp: new Date().toISOString(),
+              type: "system",
+              message: `[自愈引擎监控] 遭遇错误。特征指纹: "${fingerprint}"。当前特征累计发生 ${existing.count} 次。已自动重试/自我修复次数: ${selfHealingAttempts}/3`
+            });
+            saveTasks(activeTasks);
+
+            // Hard Breaker 1: Repetitive Error Breaker (原地磨损拦截)
+            if (existing.count >= 2) {
+              const breakMsg = `[自愈熔断] 拦截到重复错误指纹 ("${fingerprint}")。检测到模型陷入原地死循环。自愈引擎启动安全拦截，强行熔断任务运行以防止耗尽 API 限额或陷入无限等待。请人工介入排查。`;
+              task.logs.push({
+                timestamp: new Date().toISOString(),
+                type: "error",
+                message: breakMsg
+              });
+              
+              // Build unconfirmed hypothesis diagnostic report
+              const hypothesis = `\n\n### 🚨 [UNCONFIRMED_HYPOTHESIS / 未证实修复假设]\n根据系统自动反思，该故障（${errorMsg}）在执行工具 ${name} 时重复发生了 ${existing.count} 次。\n这极有可能是因为：\n1. 修复代码时没有考虑到前置依赖或环境状态；\n2. AI 模型未能跳出当前的决策局部最优解。\n请参考本提示，重置任务，检查代码逻辑并手动调整后再次运行。`;
+              
+              task.results.error = breakMsg + hypothesis;
+              task.executionStatus = "failed";
+              task.status = "failed";
+              task.completedAt = new Date().toISOString();
+              saveTasks(activeTasks);
+              return; // Halt background loop completely!
+            }
+
+            // Hard Breaker 2: Total Self-Healing Budget (总预算限额)
+            selfHealingAttempts++;
+            if (selfHealingAttempts > 3) {
+              const budgetBreakMsg = `[自愈熔断] 已达到该任务的最大自动自愈重试上限 (3次)。为保证运行确定性与防范死循环，系统自动将任务标记为失败。`;
+              task.logs.push({
+                timestamp: new Date().toISOString(),
+                type: "error",
+                message: budgetBreakMsg
+              });
+              
+              const hypothesis = `\n\n### 🚨 [UNCONFIRMED_HYPOTHESIS / 未证实修复假设]\n任务运行过程中累计触发了超过 3 次自我修复尝试。底层错误为：\n> ${errorMsg}\n建议点击“重置任务”清空对话历史，并在 Prompt 中加入更明确的修复约束。`;
+              
+              task.results.error = budgetBreakMsg + hypothesis;
+              task.executionStatus = "failed";
+              task.status = "failed";
+              task.completedAt = new Date().toISOString();
+              saveTasks(activeTasks);
+              return; // Halt background loop completely!
+            }
+
             const isSerializationOrProcessingError = 
               err instanceof TypeError || 
               err instanceof RangeError || 

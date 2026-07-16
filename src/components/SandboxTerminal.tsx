@@ -23,7 +23,7 @@ import {
   AlertTriangle
 } from "lucide-react";
 
-type ShellEngine = "bash" | "python3" | "node" | "powershell";
+type ShellEngine = "bash" | "python3" | "node" | "powershell" | "cmd";
 
 interface PresetSnippet {
   title: string;
@@ -80,6 +80,7 @@ export default function SandboxTerminal() {
       case "python3": return "text-sky-400";
       case "node": return "text-green-500";
       case "powershell": return "text-blue-400";
+      case "cmd": return "text-amber-500";
       default: return "text-slate-400";
     }
   };
@@ -90,6 +91,7 @@ export default function SandboxTerminal() {
       case "python3": return "Python 3 Runtime";
       case "node": return "Node.js JavaScript";
       case "powershell": return "PowerShell Core Emulation";
+      case "cmd": return "Windows CMD Core Emulation";
     }
   };
 
@@ -117,29 +119,82 @@ export default function SandboxTerminal() {
       let stdoutResult = "";
       let stderrResult = "";
 
-      if (forcedEngine === "powershell") {
-        // PowerShell compatibility handling
+      if (forcedEngine === "powershell" || forcedEngine === "cmd") {
+        // PowerShell & CMD compatibility handling
         let translatedCode = codeToExecute;
         const lowercaseCode = codeToExecute.trim().toLowerCase();
-        
         let hint = "";
-        // Simple PowerShell translation layer
-        if (lowercaseCode.startsWith("get-childitem") || lowercaseCode === "gci" || lowercaseCode === "dir") {
-          translatedCode = "ls -la";
-          hint = "【翻译适配层】检测到 PowerShell 指令 `Get-ChildItem` / `dir`，由于当前在 Linux 环境中运行，已无缝翻译并执行对应 Linux 命令: `ls -la`\n";
-        } else if (lowercaseCode.startsWith("get-content ") || lowercaseCode.startsWith("cat ")) {
-          const parts = codeToExecute.split(/\s+/);
-          parts.shift();
-          translatedCode = `cat ${parts.join(" ")}`;
-          hint = `【翻译适配层】检测到 PowerShell 查看文件指令，已翻译为 Linux 对应命令: \`${translatedCode}\`\n`;
-        } else if (lowercaseCode.startsWith("clear-host") || lowercaseCode === "cls") {
-          clearOutput();
-          setExecutingCmd(false);
-          return;
+        
+        if (forcedEngine === "powershell") {
+          if (lowercaseCode.startsWith("get-childitem") || lowercaseCode === "gci" || lowercaseCode === "dir") {
+            translatedCode = "ls -la";
+            hint = "【PowerShell 翻译适配层】无缝映射 Get-ChildItem / dir / gci 为 Linux 命令: `ls -la`\n";
+          } else if (lowercaseCode.startsWith("get-content") || lowercaseCode.startsWith("gc ") || lowercaseCode.startsWith("cat ")) {
+            const parts = codeToExecute.split(/\s+/);
+            parts.shift();
+            translatedCode = `cat ${parts.join(" ")}`;
+            hint = `【PowerShell 翻译适配层】无缝映射 Get-Content / gc 为 Linux 命令: \`${translatedCode}\`\n`;
+          } else if (lowercaseCode.startsWith("clear-host") || lowercaseCode === "cls") {
+            clearOutput();
+            setExecutingCmd(false);
+            return;
+          } else if (lowercaseCode.startsWith("get-process") || lowercaseCode === "ps") {
+            translatedCode = "ps aux | head -n 25";
+            hint = "【PowerShell 翻译适配层】无缝映射 Get-Process / ps 为 Linux 命令: `ps aux` 前25行\n";
+          } else if (lowercaseCode.includes("get-netipaddress") || lowercaseCode.includes("ipconfig")) {
+            translatedCode = "ip a || ifconfig";
+            hint = "【PowerShell 翻译适配层】无缝映射 Get-NetIPAddress 为 Linux 命令: `ip a`\n";
+          } else {
+            hint = "【PowerShell 兼容模式】正在将常用命令无缝映射至 Linux 内核安全执行。\n";
+          }
         } else {
-          // General command map
-          translatedCode = codeToExecute;
-          hint = "【兼容模式】由于本云端容器底层运行 Linux 内核，已启动 PowerShell 常用命令兼容引擎(模拟器模式)进行转换及执行。\n";
+          // CMD Engine
+          if (lowercaseCode === "dir" || lowercaseCode.startsWith("dir ")) {
+            translatedCode = "ls -la";
+            hint = "【CMD 翻译适配层】无缝映射 dir 指令为 Linux 对应命令: `ls -la`\n";
+          } else if (lowercaseCode.startsWith("type ")) {
+            const parts = codeToExecute.split(/\s+/);
+            parts.shift();
+            translatedCode = `cat ${parts.join(" ")}`;
+            hint = `【CMD 翻译适配层】无缝映射 type 文本查看指令为 Linux 对应命令: \`${translatedCode}\`\n`;
+          } else if (lowercaseCode.startsWith("copy ")) {
+            const parts = codeToExecute.split(/\s+/);
+            parts.shift();
+            translatedCode = `cp ${parts.join(" ")}`;
+            hint = `【CMD 翻译适配层】无缝映射 copy 文件拷贝指令为 Linux 对应命令: \`${translatedCode}\`\n`;
+          } else if (lowercaseCode.startsWith("move ")) {
+            const parts = codeToExecute.split(/\s+/);
+            parts.shift();
+            translatedCode = `mv ${parts.join(" ")}`;
+            hint = `【CMD 翻译适配层】无缝映射 move 文件移动指令为 Linux 对应命令: \`${translatedCode}\`\n`;
+          } else if (lowercaseCode.startsWith("del ") || lowercaseCode.startsWith("erase ")) {
+            const parts = codeToExecute.split(/\s+/);
+            parts.shift();
+            translatedCode = `rm -f ${parts.join(" ")}`;
+            hint = `【CMD 翻译适配层】无缝映射 del 文件删除指令为 Linux 对应命令: \`${translatedCode}\`\n`;
+          } else if (lowercaseCode.startsWith("mkdir ") || lowercaseCode.startsWith("md ")) {
+            const parts = codeToExecute.split(/\s+/);
+            parts.shift();
+            translatedCode = `mkdir -p ${parts.join(" ")}`;
+            hint = `【CMD 翻译适配层】无缝映射 mkdir 目录创建指令为 Linux 对应命令: \`${translatedCode}\`\n`;
+          } else if (lowercaseCode.startsWith("rmdir ") || lowercaseCode.startsWith("rd ")) {
+            const parts = codeToExecute.split(/\s+/);
+            parts.shift();
+            translatedCode = `rm -rf ${parts.join(" ")}`;
+            hint = `【CMD 翻译适配层】无缝映射 rmdir 目录移除指令为 Linux 对应命令: \`${translatedCode}\`\n`;
+          } else if (lowercaseCode === "cls") {
+            clearOutput();
+            setExecutingCmd(false);
+            return;
+          } else if (lowercaseCode === "ipconfig") {
+            translatedCode = "ip a || ifconfig";
+            hint = "【CMD 翻译适配层】无缝映射 ipconfig 网络查询为 Linux 对应命令: `ip a`\n";
+          } else if (lowercaseCode === "systeminfo") {
+            translatedCode = "uname -a && cat /etc/os-release";
+            hint = "// 【CMD 翻译适配层】无缝映射 systeminfo 系统诊断为 Linux 对应命令: `uname -a`\n";
+          } else {
+            hint = "【CMD 兼容模式】正在将 DOS 常用指令无缝翻译并交由 Linux 内核安全执行。\n";
+          }
         }
 
         setTerminalOutput(prev => prev + `${hint}$ ${translatedCode}\n`);
@@ -419,6 +474,28 @@ listFolders('.');`
         desc: "使用 Get-Content 提取 package.json",
         code: "Get-Content -Path package.json -Head 15"
       }
+    ],
+    cmd: [
+      {
+        title: "查看文件树 (dir)",
+        desc: "映射 Windows DOS dir 命令为 Linux 对应子进程",
+        code: "dir"
+      },
+      {
+        title: "查看 package.json (type)",
+        desc: "映射 Windows DOS type 查看文件命令",
+        code: "type package.json"
+      },
+      {
+        title: "获取网卡与 IP 地址",
+        desc: "使用 ipconfig 查询当前容器 IP 地址",
+        code: "ipconfig"
+      },
+      {
+        title: "系统硬件信息 (systeminfo)",
+        desc: "运行 systeminfo 映射并提取诊断报告",
+        code: "systeminfo"
+      }
     ]
   };
 
@@ -451,6 +528,7 @@ listFolders('.');`
                 <option value="python3">🐍 Python 3 Runtime</option>
                 <option value="node">⬡ Node.js (Javascript)</option>
                 <option value="powershell">🐚 PowerShell Core Emulation</option>
+                <option value="cmd">💻 Windows CMD Core Emulation</option>
               </select>
               <ChevronDown className="w-3 h-3 text-slate-400 absolute right-2 top-2.5 pointer-events-none" />
             </div>

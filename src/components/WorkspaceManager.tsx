@@ -655,138 +655,6 @@ export default function WorkspaceManager() {
     showAlert("成功", "✨ 成功！已将 AI 优化/修复后的完整代码载入编辑器。请在核对无误后点击顶部的【Save】进行保存。");
   };
 
-  // Code templates
-  const templates = [
-    {
-      name: "Python 简易网页爬虫",
-      filename: "crawler_demo.py",
-      description: "一键请求基础网页，并通过 HTML 标签提炼信息",
-      content: `import requests
-from bs4 import BeautifulSoup
-
-def main():
-    print("[INFO] 开始运行 Python 网页数据提取脚本...")
-    url = "https://news.ycombinator.com/"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-    }
-    try:
-        response = requests.get(url, headers=headers, timeout=10)
-        print(f"[INFO] 请求成功, 状态码: {response.status_code}")
-        
-        # 简单提取新闻标题
-        soup = BeautifulSoup(response.text, "html.parser")
-        titles = soup.select(".titleline > a")[:5]
-        
-        print("\n=== HN 热门标题 Top 5 ===")
-        for idx, item in enumerate(titles, 1):
-            print(f"{idx}. {item.text} ({item['href']})")
-            
-    except Exception as e:
-        print(f"[ERROR] 爬取失败: {e}")
-
-if __name__ == "__main__":
-    main()
-`
-    },
-    {
-      name: "Python 数据统计分析",
-      filename: "data_analyzer.py",
-      description: "读取或模拟多维度指标，进行数值聚合与指标计算",
-      content: `import json
-import os
-
-def main():
-    print("[INFO] 载入模拟数据，开始运行聚合算法...")
-    mock_data = [
-        {"item": "A", "price": 12.5, "sales": 100, "category": "电子"},
-        {"item": "B", "price": 45.0, "sales": 20, "category": "服装"},
-        {"item": "C", "price": 8.0, "sales": 340, "category": "生活"},
-        {"item": "D", "price": 120.0, "sales": 15, "category": "电子"},
-        {"item": "E", "price": 32.5, "sales": 80, "category": "生活"}
-    ]
-    
-    print(f"[INFO] 成功导入 {len(mock_data)} 条指标记录，开始统计分析：")
-    
-    # 1. 计算总销售额
-    total_revenue = sum(x["price"] * x["sales"] for x in mock_data)
-    print(f"-> 模拟总销售额: {total_revenue} 元")
-    
-    # 2. 分类汇总
-    category_summary = {}
-    for x in mock_data:
-        cat = x["category"]
-        category_summary[cat] = category_summary.get(cat, 0) + (x["price"] * x["sales"])
-        
-    print("\n=== 分类汇总报告 ===")
-    for cat, rev in category_summary.items():
-        print(f"- {cat} 类别: {rev} 元")
-        
-    # 保存分析报表到本地
-    output_path = "analysis_result.json"
-    with open(output_path, "w", encoding="utf-8") as f:
-        json.dump({"total_revenue": total_revenue, "by_category": category_summary}, f, indent=4, ensure_ascii=False)
-    print(f"\n[SUCCESS] 分析报告已成功固化保存至本地: '{output_path}'")
-
-if __name__ == "__main__":
-    main()
-`
-    },
-    {
-      name: "JS 沙箱文件过滤器",
-      filename: "file_filter.js",
-      description: "快速检索、过滤非结构化字符串，并写入文本",
-      content: `// Node.js 沙箱工作区提取解析器
-const fs = require('fs');
-const path = require('path');
-
-function run() {
-  console.log("[INFO] 启动 JavaScript 工作区日志分析流...");
-  const logData = [
-    "2026-07-15 10:00:01 [INFO] Agent started successfully",
-    "2026-07-15 10:01:23 [WARNING] High response latency detected (1.2s)",
-    "2026-07-15 10:03:45 [ERROR] Connection lost, retrying in 5s",
-    "2026-07-15 10:04:10 [INFO] Reconnected, execution restored"
-  ];
-  
-  // 过滤出 ERROR 和 WARNING 级别的严重日志
-  const severeLogs = logData.filter(line => line.includes("[ERROR]") || line.includes("[WARNING]"));
-  
-  console.log("\\n=== 严重日志警报列表 ===");
-  severeLogs.forEach(line => console.log(\`⚠️ \${line}\`));
-  
-  // 写入临时输出
-  const outPath = path.join(__dirname, "severe_logs.txt");
-  fs.writeFileSync(outPath, severeLogs.join("\\n"));
-  console.log(\`\\n[SUCCESS] 过滤后的严重警报日志已固化写入: \${outPath}\\n\`);
-}
-
-run();
-`
-    }
-  ];
-
-  const handleApplyTemplate = (tpl: typeof templates[0]) => {
-    const apply = () => {
-      setFileContent(tpl.content);
-      setIsEditing(true);
-      if (!selectedFilePath) {
-        setNewItemName(tpl.filename);
-        setNewItemType("file");
-      }
-    };
-
-    if (selectedFilePath && fileContent.trim() !== "") {
-      showConfirm(
-        "确认应用模板",
-        `应用 [${tpl.name}] 模版将替换当前编辑器中的全部内容。确定要替换吗？`,
-        apply
-      );
-    } else {
-      apply();
-    }
-  };
-
   // Recursively filter the tree based on query
   const filterFileTree = (nodes: FileNode[], query: string): FileNode[] => {
     if (!query) return nodes;
@@ -945,8 +813,8 @@ run();
   return (
     <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 lg:h-full lg:overflow-hidden h-auto overflow-y-auto pr-1 pb-4 relative" id="sandbox-workspace-workbench">
       
-      {/* LEFT PANEL: AI AGENT CHAT (Span 5) */}
-      <div className="lg:col-span-5 flex flex-col bg-[#0F172A] border border-[#1F2937] rounded-lg overflow-hidden shadow-xl h-full animate-in fade-in duration-200">
+      {/* LEFT PANEL: AI AGENT CHAT (Span 4) */}
+      <div className="lg:col-span-4 flex flex-col bg-[#0F172A] border border-[#1F2937] rounded-lg overflow-hidden shadow-xl h-full animate-in fade-in duration-200">
         {/* Tabs header */}
         <div className="border-b border-[#1F2937] bg-[#111827] flex p-1 justify-between items-center shrink-0">
           <div className="flex gap-1">
@@ -1290,8 +1158,8 @@ run();
         )}
       </div>
 
-      {/* RIGHT PANEL: COCKPIT WORKBENCH (Span 7) */}
-      <div className="lg:col-span-7 flex flex-col gap-4 h-full">
+      {/* RIGHT PANEL: COCKPIT WORKBENCH (Span 8) */}
+      <div className="lg:col-span-8 flex flex-col gap-4 h-full">
         {/* Main Tabbed Container (540px) */}
         <div className="flex-1 flex flex-col bg-[#0F172A] border border-[#1F2937] rounded-lg overflow-hidden shadow-xl relative animate-in fade-in duration-200">
           {/* Tabs Navigation */}
