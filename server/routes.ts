@@ -5,7 +5,7 @@ import os from "os";
 import dns from "dns";
 import { safePath, checkDangerousCommand, isValidPublicUrl } from "./security";
 import { loadAIConfig, saveAIConfig, diagnoseFetchError, maskConfigKeys, mergeSubmittedConfig } from "./config";
-import { saveTasks, getDiskUsagePercent, getFileTree } from "./persistence";
+import { saveTasks, getDiskUsagePercent, getFileTree, loadChatSessions, saveChatSessions } from "./persistence";
 import { callAIProvider, getBackupProvider } from "./providers";
 import { executeTaskBackground, resumeTaskBackground } from "./agent-loop";
 
@@ -1119,6 +1119,749 @@ Do not include any system metadata. Keep it concise, helpful, and direct.`;
       stream.pipe(res);
     } catch (error: any) {
       res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.get("/api/workspace/chat-sessions", (req, res) => {
+    try {
+      const sessions = loadChatSessions();
+      res.json(sessions);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/workspace/chat-sessions", (req, res) => {
+    try {
+      const { title, scope, selectedFilePath, selectedProjectFiles } = req.body;
+      const sessions = loadChatSessions();
+      const newSession = {
+        id: `session-${Date.now()}`,
+        title: title || "新对话",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        messages: [],
+        scope: scope || "single",
+        selectedFilePath: selectedFilePath || null,
+        selectedProjectFiles: selectedProjectFiles || []
+      };
+      sessions.unshift(newSession);
+      saveChatSessions(sessions);
+      res.status(201).json(newSession);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.put("/api/workspace/chat-sessions/:id", (req, res) => {
+    try {
+      const { id } = req.params;
+      const { title, scope, selectedFilePath, selectedProjectFiles } = req.body;
+      const sessions = loadChatSessions();
+      const session = sessions.find(s => s.id === id);
+      if (!session) {
+        return res.status(404).json({ error: "Session not found" });
+      }
+      if (title !== undefined) session.title = title;
+      if (scope !== undefined) session.scope = scope;
+      if (selectedFilePath !== undefined) session.selectedFilePath = selectedFilePath;
+      if (selectedProjectFiles !== undefined) session.selectedProjectFiles = selectedProjectFiles;
+      session.updatedAt = new Date().toISOString();
+      saveChatSessions(sessions);
+      res.json(session);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.delete("/api/workspace/chat-sessions/:id", (req, res) => {
+    try {
+      const { id } = req.params;
+      let sessions = loadChatSessions();
+      const initialLength = sessions.length;
+      sessions = sessions.filter(s => s.id !== id);
+      if (sessions.length === initialLength) {
+        return res.status(404).json({ error: "Session not found" });
+      }
+      saveChatSessions(sessions);
+      res.json({ success: true, message: "Session deleted" });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/workspace/chat-sessions/:id/messages", async (req, res) => {
+    const { id } = req.params;
+    const { prompt, action } = req.body;
+    if ((!prompt || !prompt.trim()) && (!action || action === "custom")) {
+      return res.status(400).json({ error: "Prompt or action is required" });
+    }
+
+    try {
+      const sessions = loadChatSessions();
+      const session = sessions.find(s => s.id === id);
+      if (!session) {
+        return res.status(404).json({ error: "Session not found" });
+      }
+
+      const getFilesRecursiveLocal = (dir: string, baseDir: string = dir): string[] => {
+        let results: string[] = [];
+        if (!fs.existsSync(dir)) return results;
+        const list = fs.readdirSync(dir);
+        for (const file of list) {
+          const fullPath = path.join(dir, file);
+          const relPath = path.relative(baseDir, fullPath);
+          const stat = fs.statSync(fullPath);
+          if (stat && stat.isDirectory()) {
+            if (!file.startsWith(".") && file !== "node_modules" && file !== "dist") {
+              results = results.concat(getFilesRecursiveLocal(fullPath, baseDir));
+            }
+          } else {
+            const ext = path.extname(file).toLowerCase();
+            const ignoreExts = [".png", ".jpg", ".jpeg", ".webp", ".gif", ".pdf", ".zip", ".tar", ".gz", ".db", ".sqlite", ".ico"];
+            if (!ignoreExts.includes(ext) && !file.startsWith(".")) {
+              results.push(relPath);
+            }
+          }
+        }
+        return results;
+      };
+
+      const buildTreeStringLocal = (dir: string, prefix: string = ""): string => {
+        let tree = "";
+        try {
+          if (!fs.existsSync(dir)) return tree;
+          const list = fs.readdirSync(dir);
+          const items = list.filter(item => !item.startsWith("."));
+          items.sort((a, b) => {
+            let aIsDir = false;
+            let bIsDir = false;
+            try { aIsDir = fs.statSync(path.join(dir, a)).isDirectory(); } catch(_) {}
+            try { bIsDir = fs.statSync(path.join(dir, b)).isDirectory(); } catch(_) {}
+            if (aIsDir && !bIsDir) return -1;
+            if (!aIsDir && bIsDir) return 1;
+            return a.localeCompare(b);
+          });
+
+          items.forEach((item, index) => {
+            const isLast = index === items.length - 1;
+            const fullPath = path.join(dir, item);
+            let isDir = false;
+            try { isDir = fs.statSync(fullPath).isDirectory(); } catch(_) {}
+            const marker = isLast ? "└── " : "├── ";
+            
+            if (isDir) {
+              if (item !== "node_modules" && item !== "dist") {
+                tree += `${prefix}${marker}${item}/\n`;
+                tree += buildTreeStringLocal(fullPath, prefix + (isLast ? "    " : "│   "));
+              }
+            } else {
+              tree += `${prefix}${marker}${item}\n`;
+            }
+          });
+        } catch (_) {}
+        return tree;
+      };
+
+      let promptText = prompt || "";
+      let displayPrompt = prompt || "";
+
+      if (action && action !== "custom") {
+        const isProjectScope = session.scope === "project";
+        const workspaceTree = buildTreeStringLocal(WORKSPACE_DIR);
+        
+        let targetFiles: { path: string; content: string }[] = [];
+        if (isProjectScope) {
+          let pathsToRead = session.selectedProjectFiles || [];
+          if (pathsToRead.length === 0) {
+            pathsToRead = getFilesRecursiveLocal(WORKSPACE_DIR);
+          }
+          let totalSize = 0;
+          for (const relPath of pathsToRead) {
+            if (totalSize >= 250 * 1024) break;
+            try {
+              const absPath = safePath(relPath);
+              if (fs.existsSync(absPath) && fs.statSync(absPath).isFile()) {
+                const size = fs.statSync(absPath).size;
+                if (size < 100 * 1024) {
+                  const content = fs.readFileSync(absPath, "utf-8");
+                  targetFiles.push({ path: relPath, content });
+                  totalSize += size;
+                }
+              }
+            } catch (e) {}
+          }
+        } else if (session.selectedFilePath) {
+          try {
+            const absPath = safePath(session.selectedFilePath);
+            if (fs.existsSync(absPath) && fs.statSync(absPath).isFile()) {
+              const content = fs.readFileSync(absPath, "utf-8");
+              targetFiles.push({ path: session.selectedFilePath, content });
+            }
+          } catch (e) {}
+        }
+
+        if (targetFiles.length > 0) {
+          const filePath = targetFiles[0].path;
+          const fileContent = targetFiles[0].content;
+          const fileSummaries = targetFiles.map(f => `--- 文件路径: ${f.path} ---\n${f.content}`).join("\n\n");
+
+          if (isProjectScope) {
+            if (action === "explain") {
+              displayPrompt = "🔍 一键宏观解构项目架构";
+              promptText = `你是一个顶尖的软件系统架构专家和首席系统分析师。请对当前沙箱项目的多文件系统进行**深度宏观解构**、**拓扑依赖提炼**与**核心生命周期数据流分析**。
+
+📂 【工作区全景目录拓扑】
+\`\`\`text
+workspace/
+${workspaceTree}
+\`\`\`
+
+当前已加载分析的核心文件上下文：
+${targetFiles.map(f => `- ${f.path}`).join("\n")}
+
+各文件具体源码内容如下：
+${fileSummaries}
+
+请提供一份极其专业、结构严密、具备高度科技感的全方位解构报告，包含以下核心版块：
+1. 📂 架构全景与模块职责
+2. 🔗 拓扑依赖网格 (包含 Mermaid 流程图)
+3. ⚡ 核心业务生命周期与数据流
+4. 💎 架构演进与优化路线图`;
+            } else if (action === "optimize") {
+              displayPrompt = "🚀 一键优化重构当前项目";
+              promptText = `你是一个精通系统重构和性能调优的顶级首席架构师。请针对当前项目的多文件协同场景，进行深度审查并输出**多文件协同重构及全局性能调优方案**。
+
+📂 【工作区全景目录拓扑】
+\`\`\`text
+workspace/
+${workspaceTree}
+\`\`\`
+
+当前已加载分析的核心文件上下文：
+${targetFiles.map(f => `- ${f.path}`).join("\n")}
+
+各文件具体源码内容如下：
+${fileSummaries}
+
+请提供一份极具落地价值、契合现代软件工程高水准的重构调优白皮书：
+1. 🎯 架构冗余与技术债清单
+2. 🚀 性能与可维护性调优方案
+3. 🛠️ 优雅重构对照设计 (提供完整重构代码块)`;
+            } else if (action === "fix-bugs") {
+              displayPrompt = "🚨 一键排查项目缺陷漏洞";
+              promptText = `你是一个卓越的白盒安全专家、Bug 猎手和高并发调试大师。请对当前沙箱项目的多文件系统进行全局严格审查，重点排查跨文件交互中的逻辑漏洞、未捕获异常、内存泄漏、并发冲突以及边缘崩溃隐患。
+
+📂 【工作区全景目录拓扑】
+\`\`\`text
+workspace/
+${workspaceTree}
+\`\`\`
+
+当前已加载分析的核心文件上下文：
+${targetFiles.map(f => `- ${f.path}`).join("\n")}
+
+各文件具体源码内容如下：
+${fileSummaries}
+
+请提供一份精准、严谨的漏洞缺陷扫描与免疫加固报告：
+1. 🚨 跨文件安全与缺陷隐患矩阵 (Markdown 表格)
+2. 🩺 关键漏洞根因诊断
+3. 💉 免疫防御编程与安全加固 (提供完整修复代码块)`;
+            } else if (action === "data-summary") {
+              displayPrompt = "📊 一键提炼项目数据血缘";
+              promptText = `你是一个顶级数据架构师和资深商业智能（BI）分析师。请对当前沙箱项目中多个文件的数据流、协议接口、持久化记录或输出内容进行**深度多文件联合提炼与数据血缘洞察**。
+
+📂 【工作区全景目录拓扑】
+\`\`\`text
+workspace/
+${workspaceTree}
+\`\`\`
+
+当前已加载分析的核心文件上下文：
+${targetFiles.map(f => `- ${f.path}`).join("\n")}
+
+各文件具体源码内容如下：
+${fileSummaries}
+
+请提炼并输出一份精细化、可直接支持数据治理的数据流契约与洞察报告：
+1. 📡 全局数据模型与接口契约总览
+2. 📊 跨源数据血缘图 (Mermaid 流程图)
+3. 💡 数据健康度诊断与演进建议`;
+            }
+          } else {
+            if (action === "explain") {
+              displayPrompt = `🔍 一键深度解读文件 [${filePath.split("/").pop()}]`;
+              promptText = `你是一个资深的软件工程专家，请对以下文件进行深度解读 and 多维度技术解析。
+
+文件路径: ${filePath}
+文件内容:
+\`\`\`
+${fileContent}
+\`\`\`
+
+请详细说明：
+1. **主要功能与应用场景**：该文件的主要职责、应用定位以及与其它的模块协作关系。
+2. **核心业务逻辑与数据流向**：梳理关键方法/类/函数的调用链路，解析数据在其中如何变化与演变。
+3. **架构与设计模式亮点**：指出其中用到的优雅设计模式、优秀的并发或容错机制。
+4. **后续维护与二次开发建议**：提供未来扩展的切入点 and 注意事项。`;
+            } else if (action === "optimize") {
+              displayPrompt = `🚀 一键重构优化文件 [${filePath.split("/").pop()}]`;
+              promptText = `你是一个追求极致性能和代码健壮性的代码重构大师。请对以下文件进行深度逻辑审查，并提出高级重构/优化意见。
+
+文件路径: ${filePath}
+文件内容:
+\`\`\`
+${fileContent}
+\`\`\`
+
+请提供：
+1. **重构亮点与原理解释**：精确定位存在的逻辑冗余、性能瓶颈、代码可读性差等问题，并详尽剖析理由。
+2. **重构调优后的完整代码**：在下方提供一份**完整**、**高可读性**、支持防御性异常捕获 and 并发安全的可替换代码。请务必将代码完整包裹在对应的代码块中。`;
+            } else if (action === "fix-bugs") {
+              displayPrompt = `🚨 一键排查文件 [${filePath.split("/").pop()}] 缺陷`;
+              promptText = `你是一个资深的白盒安全专家和卓越的 Bug 诊断工具。请对以下代码进行深度逻辑审查，严密排查潜在的运行崩溃点、异常捕获缺失、内存泄露或并发死锁。
+
+文件路径: ${filePath}
+文件内容:
+\`\`\`
+${fileContent}
+\`\`\`
+
+请提供：
+1. **多维度缺陷分析表格**：列出检测到的每个潜在漏洞、边界溢出或崩溃点，包含【缺陷定位】、【触发边界/机制】、【缺陷影响】及【失效级别】。
+2. **安全自愈设计方案**：提出从根本上规避该逻辑缺陷 of 免疫方案。
+3. **安全加固后的完整代码**：提供一份**逻辑自愈**、**100%健壮且完美修复缺陷**的完整代码，完整包裹在对应的代码块中。`;
+            } else if (action === "data-summary") {
+              displayPrompt = `📊 一键提炼文件 [${filePath.split("/").pop()}] 数据契约`;
+              promptText = `你是一个资深的数据建模专家 and 高级数据分析师。请对以下文件的数据模式、运行指标、日志输出或状态契约进行深度提炼：
+
+文件路径: ${filePath}
+文件内容:
+\`\`\`
+${fileContent}
+\`\`\`
+
+请详细归纳并提供：
+1. **核心数据字段与指标定义**：全面提取该文件中的关键常量、状态变量、或输出报表，列明其代表的物理/业务定义。
+2. **隐藏数据模式与行为特征**：解析变量之间的耦合度、状态转换轨迹或数值变化趋势。
+3. **健康度分析与下一步落地建议**：基于对代码中数据结构的审查，给出未来优化数据存储 and 接口设计的落地指引。`;
+            }
+          }
+        }
+      }
+
+      const userMessage = {
+        role: "user",
+        parts: [{ text: promptText }],
+        displayPrompt: displayPrompt,
+        timestamp: new Date().toISOString()
+      };
+      session.messages.push(userMessage);
+
+      let activeFileContext = "";
+      if (session.scope === "single" && session.selectedFilePath) {
+        try {
+          const absPath = safePath(session.selectedFilePath);
+          if (fs.existsSync(absPath) && fs.statSync(absPath).isFile()) {
+            const content = fs.readFileSync(absPath, "utf-8");
+            activeFileContext = `--- 当前选中的激活文件: ${session.selectedFilePath} ---\n\`\`\`\n${content}\n\`\`\`\n`;
+          }
+        } catch (e) {
+          console.error("Error reading active file for chat context:", e);
+        }
+      } else if (session.scope === "project") {
+        activeFileContext = "--- 当前项目核心文件上下文 ---\n";
+        let totalSize = 0;
+        const maxFiles = 15;
+        const maxSize = 300 * 1024;
+        let filesToRead = session.selectedProjectFiles || [];
+        
+        if (filesToRead.length === 0) {
+          filesToRead = getFilesRecursiveLocal(WORKSPACE_DIR);
+        }
+        for (const relPath of filesToRead) {
+          if (totalSize >= maxSize) break;
+          try {
+            const absPath = safePath(relPath);
+            if (fs.existsSync(absPath) && fs.statSync(absPath).isFile()) {
+              const size = fs.statSync(absPath).size;
+              if (size < 100 * 1024) {
+                const content = fs.readFileSync(absPath, "utf-8");
+                activeFileContext += `\n--- 文件: ${relPath} ---\n${content}\n`;
+                totalSize += size;
+              }
+            }
+          } catch (e) {}
+        }
+      }
+
+      const currentConfig = loadAIConfig();
+      const providerName = currentConfig.activeProvider || "gemini";
+      const modelName = currentConfig.activeModel || "gemini-3.5-flash";
+
+      let originalText = "";
+      let hasActions = true;
+      let loopCount = 0;
+      const maxLoops = 5; // Allow up to 5 steps of autonomous thinking & executing!
+      let lastExecutionOutput = "";
+
+      while (hasActions && loopCount < maxLoops) {
+        loopCount++;
+
+        const systemInstruction = `You are an autonomous AI Agent Developer Copilot in a live server-side sandbox. You write perfect responses in Chinese.
+You have the power to actually execute actions in the user's workspace on their behalf!
+When the user asks you to write a file, create a directory, delete a file, generate reports, or run/test a command, you MUST use the following special XML-style tags to declare the actions. The backend will automatically parse and execute them for you, feed the output back to you, and allow you to continue working until the job is complete.
+
+Supported actions:
+
+1. Create or overwrite a file (write full file content inside the tags, do not omit any code):
+<workspace_action type="create_file" path="relative/path/to/file">
+file content goes here...
+</workspace_action>
+
+2. Create a directory (mkdir):
+<workspace_action type="mkdir" path="relative/path/to/dir" />
+
+3. Delete a file or directory (recycles it safely to the trash):
+<workspace_action type="delete_file" path="relative/path/to/file" />
+
+4. Run a terminal command (e.g. run python/js scripts, compile, test, find, verify, or execute any safe shell tool):
+<workspace_action type="run_command" command="python test_zone/report.py" />
+
+Rules:
+- All paths MUST be relative to the workspace root directory (e.g. "test_zone/report.md").
+- You can execute MULTIPLE actions in one response. They will be executed sequentially.
+- If you execute a command or write a file, the execution result (stdout, success/failure) will be fed back to you in the next turn as a [System Execution Result]. You should observe this output and continue executing more actions if needed (e.g. if there's a compilation error, write a fix and run again), or write your final response/report if you are done.
+- When you are completely done with the task and no more actions are needed, simply write your final response to the user without generating any more <workspace_action> tags.
+
+以下是用户当前沙箱中最新的开发文件上下文：
+${activeFileContext}
+${lastExecutionOutput ? `\n【上一步系统自动执行结果反馈（请结合此结果进行后续决策，若有报错请直接重构编写代码修复并再次执行）：】\n${lastExecutionOutput}` : ""}`;
+
+        const historyForProvider = session.messages.map((m: any) => ({
+          role: m.role,
+          parts: m.parts
+        }));
+
+        const aiResponse = await callAIProvider(
+          providerName,
+          modelName,
+          historyForProvider,
+          0.2,
+          systemInstruction,
+          currentConfig
+        );
+
+        originalText = aiResponse.text || "";
+
+        // Parse workspace action tags
+        const actionTagRegex = /<workspace_action\s+([^>]+?)(?:\/>|>([\s\S]*?)<\/workspace_action>)/g;
+        const actionsToExecute: Array<{
+          type: string;
+          path?: string;
+          command?: string;
+          content?: string;
+          rawTag: string;
+        }> = [];
+
+        let match;
+        while ((match = actionTagRegex.exec(originalText)) !== null) {
+          const rawTag = match[0];
+          const attributesStr = match[1];
+          const content = match[2] ? match[2].trim() : "";
+
+          const typeMatch = attributesStr.match(/type="([^"]+)"/) || attributesStr.match(/type='([^']+)'/);
+          const pathMatch = attributesStr.match(/path="([^"]+)"/) || attributesStr.match(/path='([^']+)'/);
+          const commandMatch = attributesStr.match(/command="([^"]+)"/) || attributesStr.match(/command='([^']+)'/);
+
+          const type = typeMatch ? typeMatch[1] : "";
+          const pathVal = pathMatch ? pathMatch[1] : "";
+          const commandVal = commandMatch ? commandMatch[1] : "";
+
+          actionsToExecute.push({
+            type,
+            path: pathVal,
+            command: commandVal,
+            content,
+            rawTag
+          });
+        }
+
+        if (actionsToExecute.length === 0) {
+          // No more workspace actions! The agent has completed the task and generated the final text.
+          hasActions = false;
+          
+          // Let's check for fallback markdown code block creation just in case
+          const markdownCodeBlockRegex = /```(\w+)?(?:\s+([^\n]+))?\n([\s\S]+?)\n```/g;
+          let mdMatch;
+          let hasFallbackExecuted = false;
+          let executionLogs: string[] = [];
+          const executedActionsData: any[] = [];
+
+          while ((mdMatch = markdownCodeBlockRegex.exec(originalText)) !== null) {
+            const langAttr = (mdMatch[1] || "").trim();
+            const metaAttr = (mdMatch[2] || "").trim();
+            const content = mdMatch[3];
+
+            let resolvedPath = "";
+            if (metaAttr.includes("/") || metaAttr.includes(".")) {
+              resolvedPath = metaAttr;
+            } else if (langAttr.includes("/") || langAttr.includes(".")) {
+              resolvedPath = langAttr;
+            }
+
+            if (!resolvedPath) {
+              const lines = content.slice(0, 300).split("\n");
+              for (const line of lines.slice(0, 4)) {
+                const fileCommentMatch = line.match(/(?:\/\/|#|\/\*)\s*(?:@?file(?:path)?|filepath|filename|file):\s*([a-zA-Z0-9_\-\.\/]+)/i);
+                if (fileCommentMatch) {
+                  resolvedPath = fileCommentMatch[1].trim();
+                  break;
+                }
+              }
+            }
+
+            if (resolvedPath) {
+              resolvedPath = resolvedPath.replace(/^workspace\//, "").replace(/^[.\/]+/, "");
+              let success = false;
+              let size = 0;
+              let error = "";
+
+              try {
+                const filePath = safePath(resolvedPath);
+                const dir = path.dirname(filePath);
+                if (!fs.existsSync(dir)) {
+                  fs.mkdirSync(dir, { recursive: true });
+                }
+                fs.writeFileSync(filePath, content, "utf-8");
+                success = true;
+                size = content.length;
+                if (!hasFallbackExecuted) {
+                  executionLogs.push("\n\n---\n🤖 **Copilot 自动修复执行（代码块自适应提取）：**\n");
+                  hasFallbackExecuted = true;
+                }
+                executionLogs.push(`- ✅ 通过智能代码块识别创建文件: \`${resolvedPath}\` (${size} 字符)`);
+              } catch (err: any) {
+                error = err.message || "写入失败";
+                executionLogs.push(`- ❌ 智能写入 \`${resolvedPath}\` 失败: ${error}`);
+              }
+
+              executedActionsData.push({
+                type: "create_file",
+                path: resolvedPath,
+                success,
+                size,
+                error
+              });
+            }
+          }
+
+          if (hasFallbackExecuted) {
+            originalText = originalText.trim() + executionLogs.join("\n");
+          }
+
+          // Push final model response turn to session history
+          const modelMessage = {
+            role: "model",
+            parts: [{ text: originalText }],
+            timestamp: new Date().toISOString(),
+            executedActions: executedActionsData
+          };
+          session.messages.push(modelMessage);
+          break;
+        }
+
+        // Execute step-by-step actions
+        let executionLogs: string[] = [];
+        let nextTurnObservation = "【系统自动执行以下操作并获得反馈如下】：\n";
+        const executedActionsData: Array<{
+          type: string;
+          path?: string;
+          command?: string;
+          success: boolean;
+          size?: number;
+          output?: string;
+          error?: string;
+        }> = [];
+
+        executionLogs.push("\n\n---\n🤖 **Copilot 自动执行任务汇总：**\n");
+
+        for (const action of actionsToExecute) {
+          let success = false;
+          let size = 0;
+          let output = "";
+          let error = "";
+
+          try {
+            if (action.type === "create_file" || action.type === "write_file") {
+              if (!action.path) {
+                error = "未指定文件路径 `path`";
+                executionLogs.push(`- ❌ 写入文件失败：未指定文件路径 \`path\``);
+                nextTurnObservation += `- 写入文件失败：未指定 path\n`;
+                executedActionsData.push({ type: action.type, path: action.path, success, error });
+                continue;
+              }
+              const filePath = safePath(action.path);
+              const dir = path.dirname(filePath);
+              if (!fs.existsSync(dir)) {
+                fs.mkdirSync(dir, { recursive: true });
+              }
+              fs.writeFileSync(filePath, action.content || "", "utf-8");
+              success = true;
+              size = (action.content || "").length;
+              executionLogs.push(`- ✅ 成功创建/写入文件: \`${action.path}\` (${size} 字符)`);
+              nextTurnObservation += `- 成功创建/写入文件: ${action.path} (${size} 字符)\n`;
+            } else if (action.type === "mkdir") {
+              if (!action.path) {
+                error = "未指定目录路径 `path`";
+                executionLogs.push(`- ❌ 创建目录失败：未指定目录路径 \`path\``);
+                nextTurnObservation += `- 创建目录失败：未指定 path\n`;
+                executedActionsData.push({ type: action.type, path: action.path, success, error });
+                continue;
+              }
+              const dirPath = safePath(action.path);
+              fs.mkdirSync(dirPath, { recursive: true });
+              success = true;
+              executionLogs.push(`- ✅ 成功创建目录: \`${action.path}\``);
+              nextTurnObservation += `- 成功创建目录: ${action.path}\n`;
+            } else if (action.type === "delete_file") {
+              if (!action.path) {
+                error = "未指定路径 `path`";
+                executionLogs.push(`- ❌ 删除文件失败：未指定路径 \`path\``);
+                nextTurnObservation += `- 删除文件失败：未指定 path\n`;
+                executedActionsData.push({ type: action.type, path: action.path, success, error });
+                continue;
+              }
+              const itemPath = safePath(action.path);
+              if (!fs.existsSync(itemPath)) {
+                error = `路径 \`${action.path}\` 不存在`;
+                executionLogs.push(`- ⚠️ 删除失败：路径 \`${action.path}\` 不存在`);
+                nextTurnObservation += `- 删除失败：路径 ${action.path} 不存在\n`;
+                executedActionsData.push({ type: action.type, path: action.path, success, error });
+                continue;
+              }
+              ensureTrashDirs();
+              const stat = fs.statSync(itemPath);
+              const timestamp = Date.now();
+              const filename = path.basename(itemPath);
+              const trashId = `${timestamp}_${filename}`;
+              const destPath = path.join(TRASH_FILES_DIR, trashId);
+
+              fs.renameSync(itemPath, destPath);
+
+              const items = loadTrashMetadata();
+              const newItem: TrashItem = {
+                id: trashId,
+                name: filename,
+                originalPath: action.path.replace(/\\/g, "/"),
+                deletedAt: new Date().toISOString(),
+                size: stat.isDirectory() ? 4096 : stat.size,
+                isDirectory: stat.isDirectory()
+              };
+              items.push(newItem);
+              saveTrashMetadata(items);
+              success = true;
+              executionLogs.push(`- 🗑️ 已安全将文件/目录移入回收站: \`${action.path}\``);
+              nextTurnObservation += `- 已安全将文件/目录移入回收站: ${action.path}\n`;
+            } else if (action.type === "run_command") {
+              if (!action.command) {
+                error = "未指定 `command` 内容";
+                executionLogs.push(`- ❌ 运行命令失败：未指定 \`command\` 内容`);
+                nextTurnObservation += `- 运行命令失败：未指定 command\n`;
+                executedActionsData.push({ type: action.type, command: action.command, success, error });
+                continue;
+              }
+              if (checkDangerousCommand(action.command)) {
+                error = "安全拦截：该命令由于安全防护策略已被禁止运行";
+                executionLogs.push(`- 🛡️ 安全拦截：命令 \`${action.command}\` 被安全策略拒绝运行`);
+                nextTurnObservation += `- 运行命令失败：命令被安全拦截\n`;
+                executedActionsData.push({ type: action.type, command: action.command, success, error });
+                continue;
+              }
+              
+              const { exec } = await import("child_process");
+              const { promisify } = await import("util");
+              const execAsync = promisify(exec);
+              
+              executionLogs.push(`- ⚙️ 正在执行系统命令: \`${action.command}\`...`);
+              try {
+                const { stdout, stderr } = await execAsync(action.command, { cwd: WORKSPACE_DIR, timeout: 25000 });
+                output = `${stdout || ""}${stderr || ""}`.trim();
+                success = true;
+                if (output) {
+                  executionLogs.push(`  \`\`\`text\n${output}\n  \`\`\``);
+                  nextTurnObservation += `- 运行命令: ${action.command}\n  成功退出。控制台输出:\n  \`\`\`\n  ${output}\n  \`\`\`\n`;
+                } else {
+                  executionLogs.push(`  *(命令无控制台输出，静默退出)*`);
+                  nextTurnObservation += `- 运行命令: ${action.command}\n  成功退出，无输出内容。\n`;
+                }
+              } catch (execErr: any) {
+                output = `${execErr.stdout || ""}${execErr.stderr || execErr.message || ""}`.trim();
+                error = execErr.message || "命令执行异常退出";
+                executionLogs.push(`  ❌ 命令执行异常退出:\n  \`\`\`text\n${output}\n  \`\`\``);
+                nextTurnObservation += `- 运行命令: ${action.command} 失败！错误输出:\n  \`\`\`\n  ${output}\n  \`\`\`\n`;
+              }
+            } else {
+              error = `未知的操作类型: ${action.type}`;
+              executionLogs.push(`- ⚠️ 未知的操作类型: \`${action.type}\``);
+              nextTurnObservation += `- 未知的操作类型: ${action.type}\n`;
+            }
+          } catch (actionErr: any) {
+            error = actionErr.message || "未知执行错误";
+            executionLogs.push(`- ❌ 执行 \`${action.type}\` 发生系统错误: ${error}`);
+            nextTurnObservation += `- 执行发生系统错误: ${error}\n`;
+          }
+
+          executedActionsData.push({
+            type: action.type,
+            path: action.path,
+            command: action.command,
+            success,
+            size,
+            output,
+            error
+          });
+        }
+
+        // Stripping raw action tags from output text for display log
+        let cleanedModelText = originalText;
+        for (const action of actionsToExecute) {
+          cleanedModelText = cleanedModelText.replace(action.rawTag, "");
+        }
+        cleanedModelText = cleanedModelText.trim() + executionLogs.join("\n");
+
+        // Push model response turn
+        session.messages.push({
+          role: "model",
+          parts: [{ text: cleanedModelText }],
+          timestamp: new Date().toISOString(),
+          executedActions: executedActionsData
+        });
+
+        // Setup feedback loop turn for LLM
+        lastExecutionOutput = nextTurnObservation;
+        session.messages.push({
+          role: "user",
+          parts: [{ text: `【系统自动反馈】:\n${nextTurnObservation}\n请根据此执行结果决定接下来的步骤。如果任务已经圆满完成，请直接编写最终总结报告且不要包含任何 <workspace_action> 标记。如果还有待办、脚本测试、或者任何错误，请继续用 <workspace_action> 标记执行修复和验证！` }],
+          timestamp: new Date().toISOString()
+        });
+      }
+
+      if (session.title === "新对话" || session.title === "New Chat") {
+        session.title = displayPrompt.length > 20 ? displayPrompt.substring(0, 20) + "..." : displayPrompt;
+      }
+
+      session.updatedAt = new Date().toISOString();
+      saveChatSessions(sessions);
+
+      res.json({
+        success: true,
+        response: originalText,
+        session
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
     }
   });
 

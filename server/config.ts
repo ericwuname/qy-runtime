@@ -166,7 +166,8 @@ export function mergeSubmittedConfig(submitted: any, currentDisk: AIConfig): AIC
     for (const pName of Object.keys(merged.providers)) {
       const submittedProvider = merged.providers[pName];
       const diskProvider = currentDisk.providers[pName];
-      if (submittedProvider.apiKey === "******") {
+      const submittedKey = submittedProvider.apiKey ? String(submittedProvider.apiKey).trim() : "";
+      if (submittedKey === "******" || submittedKey.includes("******")) {
         submittedProvider.apiKey = diskProvider ? diskProvider.apiKey : "";
       }
     }

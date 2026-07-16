@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useRef } from "react";
 import { 
   Folder, 
   FileText, 
@@ -50,6 +50,34 @@ export default function WorkspaceManager() {
   const [originalContent, setOriginalContent] = useState<string>(""); // Used to track unsaved edits
   const [isEditing, setIsEditing] = useState(false);
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
+
+  // Custom dialog modal state
+  const [modal, setModal] = useState<{
+    isOpen: boolean;
+    type: "confirm" | "alert";
+    title: string;
+    message: string;
+    onConfirm?: () => void;
+  } | null>(null);
+
+  const showConfirm = (title: string, message: string, onConfirm: () => void) => {
+    setModal({
+      isOpen: true,
+      type: "confirm",
+      title,
+      message,
+      onConfirm
+    });
+  };
+
+  const showAlert = (title: string, message: string) => {
+    setModal({
+      isOpen: true,
+      type: "alert",
+      title,
+      message
+    });
+  };
   
   // File tree states
   const [treeViewMode, setTreeViewMode] = useState<"core" | "test" | "trash">("core");
@@ -83,41 +111,51 @@ export default function WorkspaceManager() {
         fetchFiles();
       } else {
         const data = await res.json();
-        alert(data.error || "还原失败");
+        showAlert("还原失败", data.error || "还原失败");
       }
     } catch (err) {
       console.error("Restore error:", err);
     }
   };
 
-  const handlePermanentDeleteTrashItem = async (id: string) => {
-    if (!confirm("⚠️ 彻底删除此项将无法再次恢复！确定要永久彻底删除它吗？")) return;
-    try {
-      const res = await fetch("/api/workspace/trash/delete", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id })
-      });
-      if (res.ok) {
-        fetchTrash();
+  const handlePermanentDeleteTrashItem = (id: string) => {
+    showConfirm(
+      "⚠️ 彻底删除此项将无法再次恢复！",
+      "确定要永久彻底删除它吗？此操作不可逆。",
+      async () => {
+        try {
+          const res = await fetch("/api/workspace/trash/delete", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ id })
+          });
+          if (res.ok) {
+            fetchTrash();
+          }
+        } catch (err) {
+          console.error("Permanent delete error:", err);
+        }
       }
-    } catch (err) {
-      console.error("Permanent delete error:", err);
-    }
+    );
   };
 
-  const handleEmptyTrash = async () => {
-    if (!confirm("🛑 确定要完全清空回收站吗？清空后，所有已暂存的项目都将被永久删除且无法恢复！")) return;
-    try {
-      const res = await fetch("/api/workspace/trash/empty", {
-        method: "POST"
-      });
-      if (res.ok) {
-        fetchTrash();
+  const handleEmptyTrash = () => {
+    showConfirm(
+      "🛑 完全清空回收站",
+      "确定要完全清空回收站吗？清空后，所有已暂存的项目都将被永久删除且无法恢复！",
+      async () => {
+        try {
+          const res = await fetch("/api/workspace/trash/empty", {
+            method: "POST"
+          });
+          if (res.ok) {
+            fetchTrash();
+          }
+        } catch (err) {
+          console.error("Empty trash error:", err);
+        }
       }
-    } catch (err) {
-      console.error("Empty trash error:", err);
-    }
+    );
   };
 
   const [searchQuery, setSearchQuery] = useState("");
@@ -127,7 +165,7 @@ export default function WorkspaceManager() {
 
   // Multi-file & Project scope states
   const [selectedProjectFiles, setSelectedProjectFiles] = useState<string[]>([]);
-  const [aiScope, setAiScope] = useState<"single" | "project">("single");
+  const [aiScope, setAiScope] = useState<"single" | "project" | "global">("single");
 
   // Helper to get recursive files under a folder node
   const getAllFilePathsUnderNode = (node: FileNode): string[] => {
@@ -150,6 +188,128 @@ export default function WorkspaceManager() {
   const [customPrompt, setCustomPrompt] = useState("");
   const [aiError, setAiError] = useState<string | null>(null);
 
+  // Persistent Chat Sessions states
+  const [sessions, setSessions] = useState<any[]>([]);
+  const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
+  const [showSessionsSidebar, setShowSessionsSidebar] = useState(true); // Default to true to show history immediately!
+  const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
+  const [editingSessionTitle, setEditingSessionTitle] = useState("");
+  
+  const chatBottomRef = useRef<HTMLDivElement>(null);
+
+  // Auto-scroll to the bottom of the chat pane is disabled per user request to prevent unexpected jumps.
+
+  const fetchSessions = async (selectLatest = false) => {
+    try {
+      const res = await fetch("/api/workspace/chat-sessions");
+      if (res.ok) {
+        const data = await res.json();
+        setSessions(data);
+        if (selectLatest && data.length > 0) {
+          setCurrentSessionId(data[0].id);
+          if (data[0].scope) {
+            setAiScope(data[0].scope);
+          }
+        } else if (selectLatest && data.length === 0) {
+          // Auto create a first global session on startup so the user is immediately ready to type!
+          handleCreateSession("global");
+        }
+      }
+    } catch (err) {
+      console.error("Error fetching chat sessions:", err);
+    }
+  };
+
+  const handleCreateSession = async (scopeOverride?: "single" | "project" | "global") => {
+    try {
+      const res = await fetch("/api/workspace/chat-sessions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: "新对话",
+          scope: scopeOverride || aiScope,
+          selectedFilePath: selectedFilePath,
+          selectedProjectFiles: selectedProjectFiles
+        })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setSessions(prev => [data, ...prev]);
+        setCurrentSessionId(data.id);
+        setAiResponse("");
+        setAiError(null);
+        if (data.scope) {
+          setAiScope(data.scope);
+        }
+        return data.id;
+      }
+    } catch (err) {
+      console.error("Error creating session:", err);
+    }
+    return null;
+  };
+
+  // Sync scope changes from frontend selection to active backend session
+  useEffect(() => {
+    if (currentSessionId) {
+      const activeSession = sessions.find(s => s.id === currentSessionId);
+      if (activeSession && activeSession.scope !== aiScope) {
+        fetch(`/api/workspace/chat-sessions/${currentSessionId}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ scope: aiScope })
+        }).then(res => {
+          if (res.ok) {
+            res.json().then(updated => {
+              setSessions(prev => prev.map(s => s.id === currentSessionId ? updated : s));
+            });
+          }
+        });
+      }
+    }
+  }, [aiScope, currentSessionId]);
+
+  const handleRenameSession = async (id: string, newTitle: string) => {
+    if (!newTitle.trim()) return;
+    try {
+      const res = await fetch(`/api/workspace/chat-sessions/${id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: newTitle })
+      });
+      if (res.ok) {
+        const updated = await res.json();
+        setSessions(prev => prev.map(s => s.id === id ? updated : s));
+        setEditingSessionId(null);
+      }
+    } catch (err) {
+      console.error("Error renaming session:", err);
+    }
+  };
+
+  const handleDeleteSession = (id: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    showConfirm(
+      "确认删除对话",
+      "确定要删除这条对话历史吗？删除后内容无法恢复。",
+      async () => {
+        try {
+          const res = await fetch(`/api/workspace/chat-sessions/${id}`, {
+            method: "DELETE"
+          });
+          if (res.ok) {
+            setSessions(prev => prev.filter(s => s.id !== id));
+            if (currentSessionId === id) {
+              setCurrentSessionId(null);
+            }
+          }
+        } catch (err) {
+          console.error("Error deleting session:", err);
+        }
+      }
+    );
+  };
+
   // Terminal manual shell execution
   const [manualCommand, setManualCommand] = useState("");
   const [terminalOutput, setTerminalOutput] = useState("");
@@ -159,32 +319,37 @@ export default function WorkspaceManager() {
   const [cleaning, setCleaning] = useState(false);
   const [cleanStats, setCleanStats] = useState<{ deletedCount: number; releasedBytes: number } | null>(null);
 
-  const handleCleanCache = async () => {
-    if (!confirm("🧪 确认要一键清理测试沙箱区域吗？\n\n此操作将安全清空 test_zone 目录下的所有临时文件并暂存到历史回收站中，不仅保障核心开发代码 100% 安全，还能随时在回收站中完美自愈恢复！")) return;
-    setCleaning(true);
-    setCleanStats(null);
-    try {
-      const res = await fetch("/api/workspace/clean-cache", {
-        method: "POST"
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setCleanStats({
-          deletedCount: data.deletedCount,
-          releasedBytes: data.releasedBytes
-        });
-        fetchFiles();
-        fetchTrash(); // Auto refresh trash list to reflect newly recycled files
-        setTimeout(() => setCleanStats(null), 6000);
-      } else {
-        alert("清理失败，请重试或查看系统后台。");
+  const handleCleanCache = () => {
+    showConfirm(
+      "🧪 一键清理测试沙箱区域",
+      "此操作将安全清空 test_zone 目录下的所有临时文件并暂存到历史回收站中，不仅保障核心开发代码 100% 安全，还能随时在回收站中完美自愈恢复！",
+      async () => {
+        setCleaning(true);
+        setCleanStats(null);
+        try {
+          const res = await fetch("/api/workspace/clean-cache", {
+            method: "POST"
+          });
+          if (res.ok) {
+            const data = await res.json();
+            setCleanStats({
+              deletedCount: data.deletedCount,
+              releasedBytes: data.releasedBytes
+            });
+            fetchFiles();
+            fetchTrash(); // Auto refresh trash list to reflect newly recycled files
+            setTimeout(() => setCleanStats(null), 6000);
+          } else {
+            showAlert("清理失败", "清理失败，请重试或查看系统后台。");
+          }
+        } catch (err) {
+          console.error("Error cleaning cache:", err);
+          showAlert("连接失败", "清理请求失败，无法连接到执行端服务器。");
+        } finally {
+          setCleaning(false);
+        }
       }
-    } catch (err) {
-      console.error("Error cleaning cache:", err);
-      alert("清理请求失败，无法连接到执行端服务器。");
-    } finally {
-      setCleaning(false);
-    }
+    );
   };
 
   // Fetch file tree
@@ -206,6 +371,7 @@ export default function WorkspaceManager() {
   useEffect(() => {
     fetchFiles();
     fetchTrash();
+    fetchSessions(true);
   }, [treeViewMode]);
 
   // Handle click on file
@@ -249,38 +415,43 @@ export default function WorkspaceManager() {
   };
 
   // Delete file/folder
-  const handleDeleteItem = async (e: React.MouseEvent, path: string) => {
+  const handleDeleteItem = (e: React.MouseEvent, path: string) => {
     e.stopPropagation();
     const isTestFile = path.startsWith("test_zone/") || path === "test_zone";
+    const confirmTitle = isTestFile ? "确认移入回收站" : "⚠️ 警告：正在删除核心文件！";
     const confirmMessage = isTestFile 
-      ? `确认要将测试文件移入历史回收站吗？\n\n项目: ${path}`
-      : `⚠️ 警告：您正在删除【核心开发文件】！\n该操作虽然会将文件安全移入历史回收站，但可能导致当前项目架构或运行中断。\n\n确认要回收此核心文件吗？\n项目: ${path}`;
+      ? `确认要将测试文件移入历史回收站吗？\n\n路径: ${path}`
+      : `该操作虽然会将文件安全移入历史回收站，但可能导致当前项目架构或运行中断。\n\n确认要回收此核心开发文件吗？\n路径: ${path}`;
     
-    if (!confirm(confirmMessage)) return;
-
-    try {
-      const res = await fetch("/api/workspace/delete", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path })
-      });
-      if (res.ok) {
-        if (selectedFilePath === path) {
-          setSelectedFilePath(null);
-          setFileContent("");
-          setOriginalContent("");
+    showConfirm(
+      confirmTitle,
+      confirmMessage,
+      async () => {
+        try {
+          const res = await fetch("/api/workspace/delete", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ path })
+          });
+          if (res.ok) {
+            if (selectedFilePath === path) {
+              setSelectedFilePath(null);
+              setFileContent("");
+              setOriginalContent("");
+            }
+            fetchFiles();
+            if (treeViewMode === "trash") {
+              fetchTrash();
+            }
+          } else {
+            const data = await res.json();
+            showAlert("删除失败", data.error || "删除失败");
+          }
+        } catch (err) {
+          console.error("Error deleting item:", err);
         }
-        fetchFiles();
-        if (treeViewMode === "trash") {
-          fetchTrash();
-        }
-      } else {
-        const data = await res.json();
-        alert(data.error || "删除失败");
       }
-    } catch (err) {
-      console.error("Error deleting item:", err);
-    }
+    );
   };
 
   // Create new file or folder
@@ -313,7 +484,7 @@ export default function WorkspaceManager() {
         }
       } else {
         const data = await res.json();
-        alert(data.error || "创建失败");
+        showAlert("创建失败", data.error || "创建失败");
       }
     } catch (err) {
       console.error("Error creating item:", err);
@@ -378,7 +549,7 @@ export default function WorkspaceManager() {
   // AI assistant handlers
   const handleCallAiCopilot = async (action: "explain" | "optimize" | "fix-bugs" | "data-summary" | "custom") => {
     if (aiScope === "single" && !selectedFilePath) {
-      alert("请先在左侧文件树选择一个激活文件，或者切换到【项目级分析】。");
+      showAlert("提示", "请先在左侧文件树选择一个激活文件，或者切换到【项目级分析】。");
       return;
     }
     setAiLoading(true);
@@ -386,27 +557,29 @@ export default function WorkspaceManager() {
     setAiResponse("");
 
     try {
-      const body: any = {
-        scope: aiScope,
-        action,
-        customPrompt: action === "custom" ? customPrompt : undefined
-      };
-
-      if (aiScope === "single") {
-        body.filePath = selectedFilePath;
-        body.fileContent = fileContent;
-      } else {
-        body.filePaths = selectedProjectFiles;
+      let sessionId = currentSessionId;
+      if (!sessionId) {
+        sessionId = await handleCreateSession();
+      }
+      if (!sessionId) {
+        throw new Error("无法创建或定位有效的对话会话");
       }
 
-      const res = await fetch("/api/workspace/ai-assistant", {
+      const body: any = {
+        prompt: action === "custom" ? customPrompt : "",
+        action
+      };
+
+      const res = await fetch(`/api/workspace/chat-sessions/${sessionId}/messages`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body)
       });
+
       if (res.ok) {
         const data = await res.json();
-        if (data.success && data.response) {
+        if (data.success && data.session) {
+          setSessions(prev => prev.map(s => s.id === sessionId ? data.session : s));
           setAiResponse(data.response);
           if (action === "custom") {
             setCustomPrompt("");
@@ -422,6 +595,8 @@ export default function WorkspaceManager() {
       setAiError(err.message || "请求发送失败，无法连接到 AI 协同服务器。");
     } finally {
       setAiLoading(false);
+      fetchSessions();
+      fetchFiles(); // Auto-refresh file tree to instantly display newly created/modified files
     }
   };
 
@@ -437,7 +612,7 @@ export default function WorkspaceManager() {
     if (!code) return;
     setFileContent(code);
     setIsEditing(true);
-    alert("✨ 成功！已将 AI 优化/修复后的完整代码载入编辑器。请在核对无误后点击顶部的【Save】进行保存。");
+    showAlert("成功", "✨ 成功！已将 AI 优化/修复后的完整代码载入编辑器。请在核对无误后点击顶部的【Save】进行保存。");
   };
 
   // Code templates
@@ -552,14 +727,23 @@ run();
   ];
 
   const handleApplyTemplate = (tpl: typeof templates[0]) => {
+    const apply = () => {
+      setFileContent(tpl.content);
+      setIsEditing(true);
+      if (!selectedFilePath) {
+        setNewItemName(tpl.filename);
+        setNewItemType("file");
+      }
+    };
+
     if (selectedFilePath && fileContent.trim() !== "") {
-      if (!confirm(`应用 [${tpl.name}] 模版将替换当前编辑器中的全部内容。确定要替换吗？`)) return;
-    }
-    setFileContent(tpl.content);
-    setIsEditing(true);
-    if (!selectedFilePath) {
-      setNewItemName(tpl.filename);
-      setNewItemType("file");
+      showConfirm(
+        "确认应用模板",
+        `应用 [${tpl.name}] 模版将替换当前编辑器中的全部内容。确定要替换吗？`,
+        apply
+      );
+    } else {
+      apply();
     }
   };
 
@@ -1140,6 +1324,18 @@ run();
                 <span>AI Copilot</span>
               </button>
               <button
+                onClick={() => setShowSessionsSidebar(prev => !prev)}
+                className={`px-3 py-1.5 rounded text-[10px] font-mono font-bold uppercase flex items-center gap-1.5 transition-all cursor-pointer ${
+                  showSessionsSidebar
+                    ? "bg-[#020617] text-amber-400 border border-[#1F2937]"
+                    : "text-slate-500 hover:text-slate-300"
+                }`}
+                title="查看/管理历史对话"
+              >
+                <History className="w-3.5 h-3.5 text-amber-400" />
+                <span>历史记录</span>
+              </button>
+              <button
                 onClick={() => setActiveTab("template")}
                 className={`px-3 py-1.5 rounded text-[10px] font-mono font-bold uppercase flex items-center gap-1.5 transition-all cursor-pointer ${
                   activeTab === "template"
@@ -1148,7 +1344,7 @@ run();
                 }`}
               >
                 <FileCode className="w-3.5 h-3.5 text-purple-400" />
-                <span>Code Templates</span>
+                <span>极速模板</span>
               </button>
             </div>
             <button
@@ -1162,176 +1358,402 @@ run();
 
           {/* TAB 1: AI ASSISTANT PORTAL */}
           {activeTab === "ai" && (
-            <div className="flex-1 flex flex-col overflow-hidden">
-              {/* Scope Toggler */}
-              <div className="p-2 border-b border-[#1F2937]/80 bg-[#111827]/60 flex items-center justify-between gap-2.5 shrink-0">
-                <span className="text-[10px] font-mono font-bold uppercase text-slate-400">分析范围 / SCOPE:</span>
-                <div className="flex bg-[#020617] p-0.5 rounded border border-[#1F2937] text-[10px] font-mono">
-                  <button
-                    type="button"
-                    onClick={() => setAiScope("single")}
-                    className={`px-2.5 py-1 rounded font-bold transition-all cursor-pointer ${
-                      aiScope === "single"
-                        ? "bg-blue-600 text-white font-extrabold"
-                        : "text-slate-500 hover:text-slate-300"
-                    }`}
-                  >
-                    单文件
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setAiScope("project")}
-                    className={`px-2.5 py-1 rounded font-bold transition-all relative cursor-pointer ${
-                      aiScope === "project"
-                        ? "bg-blue-600 text-white font-extrabold"
-                        : "text-slate-500 hover:text-slate-300"
-                    }`}
-                  >
-                    项目级 ({selectedProjectFiles.length}个文件)
-                    {selectedProjectFiles.length > 0 && (
-                      <span className="absolute -top-1 -right-1 flex h-2 w-2">
-                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                        <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
-                      </span>
+            <div className="flex-1 flex overflow-hidden relative">
+              {/* Sessions Sidebar */}
+              {showSessionsSidebar && (
+                <div className="w-[180px] shrink-0 border-r border-[#1F2937] bg-[#0A0B0E]/80 flex flex-col overflow-hidden animate-in slide-in-from-left duration-150">
+                  <div className="p-2 border-b border-[#1F2937] flex items-center justify-between shrink-0 bg-[#111827]">
+                    <span className="text-[9px] font-mono font-bold text-slate-400 uppercase tracking-widest">对话历史</span>
+                    <button
+                      onClick={() => handleCreateSession()}
+                      className="px-1.5 py-0.5 bg-blue-900/30 hover:bg-blue-900/60 text-blue-400 border border-blue-500/20 text-[9px] font-mono rounded font-bold cursor-pointer transition-colors"
+                      title="新建对话"
+                    >
+                      + 新建
+                    </button>
+                  </div>
+                  <div className="flex-1 overflow-y-auto p-1 space-y-1">
+                    {sessions.length === 0 ? (
+                      <div className="text-[10px] text-slate-600 text-center py-6 font-mono">暂无对话记录</div>
+                    ) : (
+                      sessions.map(s => {
+                        const isSelected = s.id === currentSessionId;
+                        const isEditing = s.id === editingSessionId;
+                        return (
+                          <div
+                            key={s.id}
+                            onClick={() => {
+                              setCurrentSessionId(s.id);
+                              const lastMsg = s.messages && s.messages.length > 0 ? s.messages[s.messages.length - 1] : null;
+                              setAiResponse(lastMsg && lastMsg.role === "model" ? lastMsg.parts[0].text : "");
+                              setAiError(null);
+                            }}
+                            className={`p-2 rounded text-[11px] group relative flex flex-col cursor-pointer transition-colors ${
+                              isSelected
+                                ? "bg-blue-950/40 border border-blue-500/20 text-blue-300"
+                                : "text-slate-400 hover:bg-slate-800/50 hover:text-slate-200"
+                            }`}
+                          >
+                            <div className="flex-1 min-w-0 pr-6">
+                              {isEditing ? (
+                                <input
+                                  type="text"
+                                  autoFocus
+                                  value={editingSessionTitle}
+                                  onChange={e => setEditingSessionTitle(e.target.value)}
+                                  onBlur={() => handleRenameSession(s.id, editingSessionTitle)}
+                                  onKeyDown={e => {
+                                    if (e.key === "Enter") handleRenameSession(s.id, editingSessionTitle);
+                                    if (e.key === "Escape") setEditingSessionId(null);
+                                  }}
+                                  className="w-full bg-slate-900 border border-blue-500 rounded px-1 text-[11px] text-slate-200 outline-none"
+                                />
+                              ) : (
+                                <div className="truncate font-medium">{s.title || "新对话"}</div>
+                              )}
+                              <div className="text-[8px] text-slate-600 font-mono mt-0.5">
+                                {new Date(s.updatedAt || s.createdAt).toLocaleDateString("zh-CN", {
+                                  month: "numeric",
+                                  day: "numeric",
+                                  hour: "2-digit",
+                                  minute: "2-digit"
+                                })}
+                              </div>
+                            </div>
+                            
+                            {!isEditing && (
+                              <div className="absolute right-1 top-2.5 opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1.5 pl-2">
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setEditingSessionId(s.id);
+                                    setEditingSessionTitle(s.title || "新对话");
+                                  }}
+                                  className="text-[10px] text-slate-500 hover:text-slate-300"
+                                  title="重命名"
+                                >
+                                  ✏️
+                                </button>
+                                <button
+                                  onClick={(e) => handleDeleteSession(s.id, e)}
+                                  className="text-slate-500 hover:text-rose-400"
+                                  title="删除"
+                                >
+                                  <Trash2 className="w-2.5 h-2.5" />
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })
                     )}
-                  </button>
-                </div>
-              </div>
-
-              {/* Quick Prompt Command Matrix */}
-              {aiScope === "project" || selectedFilePath ? (
-                <div className="p-3 bg-[#0A0F1D]/50 border-b border-[#1F2937] space-y-1.5 shrink-0 animate-in fade-in duration-200">
-                  <div className="flex justify-between items-center mb-1">
-                    <span className="text-[9px] font-mono font-bold text-slate-500 uppercase tracking-widest block">AI Quick Analysis (一键智能深度透视)</span>
-                    <span className="text-[9px] font-mono font-bold bg-blue-950/60 text-blue-400 px-1.5 py-0.5 rounded border border-blue-900/40">
-                      {aiScope === "project" ? `项目分析 (${selectedProjectFiles.length}个文件)` : `单文件: ${selectedFilePath?.split("/").pop()}`}
-                    </span>
                   </div>
-                  {aiScope === "project" && selectedProjectFiles.length === 0 && (
-                    <div className="p-2 border border-amber-500/20 bg-amber-950/20 rounded text-[10px] text-amber-400 leading-normal mb-1 font-mono">
-                      💡 提示：您尚未在左侧勾选特定文件。项目分析将默认搜索并分析整个工作区内的主要逻辑和配置上下文！
-                    </div>
-                  )}
-                  <div className="grid grid-cols-2 gap-2">
-                    <button
-                      onClick={() => handleCallAiCopilot("explain")}
-                      disabled={aiLoading}
-                      className="py-1.5 px-2 bg-slate-800/80 hover:bg-slate-700 border border-slate-700/50 rounded flex items-center justify-center gap-1.5 text-[10px] font-bold text-slate-300 cursor-pointer transition-colors"
-                    >
-                      <Settings className="w-3.5 h-3.5 text-blue-400" />
-                      <span>{aiScope === "project" ? "一键解构项目" : "解读文件逻辑"}</span>
-                    </button>
-                    <button
-                      onClick={() => handleCallAiCopilot("optimize")}
-                      disabled={aiLoading}
-                      className="py-1.5 px-2 bg-slate-800/80 hover:bg-slate-700 border border-slate-700/50 rounded flex items-center justify-center gap-1.5 text-[10px] font-bold text-slate-300 cursor-pointer transition-colors"
-                    >
-                      <Cpu className="w-3.5 h-3.5 text-emerald-400 animate-pulse" />
-                      <span>{aiScope === "project" ? "项目重构优化" : "性能与重构优化"}</span>
-                    </button>
-                    <button
-                      onClick={() => handleCallAiCopilot("fix-bugs")}
-                      disabled={aiLoading}
-                      className="py-1.5 px-2 bg-slate-800/80 hover:bg-slate-700 border border-slate-700/50 rounded flex items-center justify-center gap-1.5 text-[10px] font-bold text-slate-300 cursor-pointer transition-colors"
-                    >
-                      <Activity className="w-3.5 h-3.5 text-rose-400" />
-                      <span>{aiScope === "project" ? "项目缺陷扫描" : "代码缺陷排查"}</span>
-                    </button>
-                    <button
-                      onClick={() => handleCallAiCopilot("data-summary")}
-                      disabled={aiLoading}
-                      className="py-1.5 px-2 bg-slate-800/80 hover:bg-slate-700 border border-slate-700/50 rounded flex items-center justify-center gap-1.5 text-[10px] font-bold text-slate-300 cursor-pointer transition-colors"
-                    >
-                      <FileText className="w-3.5 h-3.5 text-purple-400" />
-                      <span>{aiScope === "project" ? "跨文件数据提炼" : "数据提炼洞察"}</span>
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <div className="p-4 text-center border-b border-[#1F2937] bg-[#0A0B0E]/20 text-[10px] font-mono text-slate-500 shrink-0">
-                  ⚠️ 请在左侧文件树中先点击选择一个文件，以解锁 AI 协同能力
                 </div>
               )}
 
-              {/* Stream output panel */}
-              <div className="flex-1 overflow-y-auto p-4 bg-[#030712] relative flex flex-col justify-between">
-                <div>
-                  {aiResponse ? (
-                    <div className="markdown-body text-xs text-slate-300 select-text leading-relaxed space-y-2.5">
-                      <Markdown>{aiResponse}</Markdown>
-                    </div>
-                  ) : aiLoading ? (
-                    <div className="flex flex-col items-center justify-center py-20 gap-3">
-                      <div className="flex items-center gap-1">
-                        <span className="w-2 h-2 bg-blue-400 rounded-full animate-bounce duration-300 [animation-delay:-0.3s]" />
-                        <span className="w-2 h-2 bg-blue-400 rounded-full animate-bounce duration-300 [animation-delay:-0.15s]" />
-                        <span className="w-2 h-2 bg-blue-400 rounded-full animate-bounce duration-300" />
-                      </div>
-                      <span className="text-[10px] font-mono text-slate-500 uppercase tracking-wider animate-pulse">Copilot 正在聚合分析上下文...</span>
-                    </div>
-                  ) : aiError ? (
-                    <div className="p-3 rounded border border-rose-900/30 bg-rose-950/20 text-rose-400 text-xs font-mono whitespace-pre-wrap leading-relaxed">
-                      ❌ {aiError}
-                    </div>
-                  ) : (
-                    <div className="text-center py-24 text-slate-600 font-sans">
-                      <Sparkles className="w-8 h-8 text-slate-800 mx-auto mb-2 animate-pulse" />
-                      <p className="text-[10px] uppercase font-mono tracking-wider">AI Copilot Interactive Frame</p>
-                      <p className="text-[9px] text-slate-700 mt-1 max-w-[200px] mx-auto">点击一键分析或在下方输入框中向 AI 提问。</p>
-                    </div>
-                  )}
-                </div>
-
-                {/* SELF HEALING CTA PANEL: If AI has optimized/fixed code, render code healing bar */}
-                {hasExtractedCode && !aiLoading && (
-                  <div className="sticky bottom-0 left-0 right-0 p-2.5 border border-emerald-500/20 bg-emerald-950/30 rounded mt-5 flex flex-col gap-1.5 shadow-xl backdrop-blur-sm animate-in zoom-in-95 duration-150">
-                    <div className="flex items-center gap-1.5">
-                      <Check className="w-3.5 h-3.5 text-emerald-400" />
-                      <span className="text-[9px] font-mono text-emerald-400 font-bold uppercase">检测到 AI 推荐的新版完整代码</span>
-                    </div>
+              {/* Chat Main Area */}
+              <div className="flex-1 flex flex-col overflow-hidden">
+                {/* Scope Toggler */}
+                <div className="p-2 border-b border-[#1F2937]/80 bg-[#111827]/60 flex items-center justify-between gap-2.5 shrink-0">
+                  <span className="text-[10px] font-mono font-bold uppercase text-slate-400">分析范围 / SCOPE:</span>
+                  <div className="flex bg-[#020617] p-0.5 rounded border border-[#1F2937] text-[10px] font-mono">
                     <button
-                      onClick={handleApplyAiSuggestion}
-                      className="w-full py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold font-mono text-[10px] uppercase rounded cursor-pointer transition-all flex items-center justify-center gap-1 shadow shadow-emerald-950"
+                      type="button"
+                      onClick={() => setAiScope("single")}
+                      className={`px-2.5 py-1 rounded font-bold transition-all cursor-pointer ${
+                        aiScope === "single"
+                          ? "bg-blue-600 text-white font-extrabold"
+                          : "text-slate-500 hover:text-slate-300"
+                      }`}
                     >
-                      <Copy className="w-3 h-3" />
-                      <span>一键应用并覆盖编辑器代码</span>
+                      单文件
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setAiScope("project")}
+                      className={`px-2.5 py-1 rounded font-bold transition-all relative cursor-pointer ${
+                        aiScope === "project"
+                          ? "bg-blue-600 text-white font-extrabold"
+                          : "text-slate-500 hover:text-slate-300"
+                      }`}
+                    >
+                      项目级 ({selectedProjectFiles.length}个文件)
+                      {selectedProjectFiles.length > 0 && (
+                        <span className="absolute -top-1 -right-1 flex h-2 w-2">
+                          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                          <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                        </span>
+                      )}
                     </button>
                   </div>
-                )}
-              </div>
+                </div>
 
-              {/* Chat Input interface */}
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  if (customPrompt.trim()) handleCallAiCopilot("custom");
-                }}
-                className="p-2 border-t border-[#1F2937] bg-[#111827] flex gap-1.5 shrink-0"
-              >
-                <input
-                  type="text"
-                  disabled={aiLoading || (aiScope === "single" && !selectedFilePath)}
-                  placeholder={
-                    aiScope === "project"
-                      ? selectedProjectFiles.length > 0
-                        ? `提问勾选的 ${selectedProjectFiles.length} 个文件...`
-                        : "提问或一键全盘检索整个项目..."
-                      : selectedFilePath
-                      ? "关于此文件你有什么疑问？..."
-                      : "请先选择需要分析的文件"
-                  }
-                  value={customPrompt}
-                  onChange={(e) => setCustomPrompt(e.target.value)}
-                  className="flex-1 px-2.5 py-1.5 bg-[#020617] border border-[#1F2937] rounded text-slate-200 text-xs focus:outline-none focus:border-blue-500/50 disabled:opacity-50 placeholder-slate-700 font-mono"
-                />
-                <button
-                  type="submit"
-                  disabled={aiLoading || (aiScope === "single" && !selectedFilePath) || !customPrompt.trim()}
-                  className="px-2.5 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800 disabled:text-slate-600 text-white font-bold font-mono text-[10px] rounded cursor-pointer transition-colors"
+                {/* Active Model Pool HUD */}
+                <div className="px-3 py-1.5 border-b border-[#1F2937]/65 bg-[#080E1A] flex items-center justify-between gap-2 shrink-0 select-none">
+                  <div className="flex items-center gap-1.5 overflow-hidden">
+                    <span className="relative flex h-2 w-2 shrink-0">
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                      <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                    </span>
+                    <span className="text-[9px] font-mono font-bold text-slate-400 truncate uppercase tracking-wider">
+                      Active Model Pool Connected
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1 shrink-0">
+                    <span className="px-1.5 py-0.5 bg-[#020617] text-[9px] font-mono text-blue-400 rounded border border-[#1F2937]">
+                      Gemini 3.5 Flash
+                    </span>
+                    <span className="px-1.5 py-0.5 bg-emerald-950/40 text-[9px] font-mono text-emerald-400 rounded border border-emerald-900/30">
+                      No-Cost Pool
+                    </span>
+                  </div>
+                </div>
+
+                {/* Quick Prompt Command Matrix */}
+                {(aiScope === "project" || selectedFilePath) && (
+                  <div className="p-3 bg-[#0A0F1D]/50 border-b border-[#1F2937] space-y-1.5 shrink-0 animate-in fade-in duration-200">
+                    <div className="flex justify-between items-center mb-1">
+                      <span className="text-[9px] font-mono font-bold text-slate-500 uppercase tracking-widest block">AI Quick Analysis (一键智能深度透视)</span>
+                      <span className="text-[9px] font-mono font-bold bg-blue-950/60 text-blue-400 px-1.5 py-0.5 rounded border border-blue-900/40 font-mono">
+                        {aiScope === "project" ? `项目分析 (${selectedProjectFiles.length}个文件)` : `单文件: ${selectedFilePath?.split("/").pop()}`}
+                      </span>
+                    </div>
+                    {aiScope === "project" && selectedProjectFiles.length === 0 && (
+                      <div className="p-2 border border-amber-500/20 bg-amber-950/20 rounded text-[10px] text-amber-400 leading-normal mb-1 font-mono">
+                        💡 提示：您尚未在左侧勾选特定文件。项目分析将默认搜索并分析整个工作区内的主要 logic 和配置上下文！
+                      </div>
+                    )}
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        onClick={() => handleCallAiCopilot("explain")}
+                        disabled={aiLoading}
+                        className="py-1.5 px-2 bg-slate-800/80 hover:bg-slate-700 border border-slate-700/50 rounded flex items-center justify-center gap-1.5 text-[10px] font-bold text-slate-300 cursor-pointer transition-colors"
+                      >
+                        <Settings className="w-3.5 h-3.5 text-blue-400" />
+                        <span>{aiScope === "project" ? "一键解构项目" : "解读文件逻辑"}</span>
+                      </button>
+                      <button
+                        onClick={() => handleCallAiCopilot("optimize")}
+                        disabled={aiLoading}
+                        className="py-1.5 px-2 bg-slate-800/80 hover:bg-slate-700 border border-slate-700/50 rounded flex items-center justify-center gap-1.5 text-[10px] font-bold text-slate-300 cursor-pointer transition-colors"
+                      >
+                        <Cpu className="w-3.5 h-3.5 text-emerald-400 animate-pulse" />
+                        <span>{aiScope === "project" ? "项目重构优化" : "性能与重构优化"}</span>
+                      </button>
+                      <button
+                        onClick={() => handleCallAiCopilot("fix-bugs")}
+                        disabled={aiLoading}
+                        className="py-1.5 px-2 bg-slate-800/80 hover:bg-slate-700 border border-slate-700/50 rounded flex items-center justify-center gap-1.5 text-[10px] font-bold text-slate-300 cursor-pointer transition-colors"
+                      >
+                        <Activity className="w-3.5 h-3.5 text-rose-400" />
+                        <span>{aiScope === "project" ? "项目缺陷扫描" : "代码缺陷排查"}</span>
+                      </button>
+                      <button
+                        onClick={() => handleCallAiCopilot("data-summary")}
+                        disabled={aiLoading}
+                        className="py-1.5 px-2 bg-slate-800/80 hover:bg-slate-700 border border-slate-700/50 rounded flex items-center justify-center gap-1.5 text-[10px] font-bold text-slate-300 cursor-pointer transition-colors"
+                      >
+                        <FileText className="w-3.5 h-3.5 text-purple-400" />
+                        <span>{aiScope === "project" ? "跨文件数据提炼" : "数据提炼洞察"}</span>
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {!(aiScope === "project" || selectedFilePath) && (
+                  <div className="p-4 text-center border-b border-[#1F2937] bg-[#0A0B0E]/20 text-[10px] font-mono text-slate-500 shrink-0">
+                    ⚠️ 请在左侧文件树中先点击选择一个文件，以解锁 AI 协同能力
+                  </div>
+                )}
+
+                {/* Stream output panel */}
+                <div className="flex-1 overflow-y-auto p-4 bg-[#030712] relative space-y-4 select-text">
+                  {(() => {
+                    const activeSession = sessions.find(s => s.id === currentSessionId);
+                    if (activeSession && activeSession.messages && activeSession.messages.length > 0) {
+                      return activeSession.messages.map((msg: any, idx: number) => {
+                        const isUser = msg.role === "user";
+                        return (
+                          <div
+                            key={idx}
+                            className={`flex flex-col ${isUser ? "items-end" : "items-start"} animate-in fade-in slide-in-from-bottom-2 duration-150`}
+                          >
+                            <div className="flex items-center gap-1 text-[9px] text-slate-500 font-mono mb-1 px-1">
+                              <span>{isUser ? "You" : "Copilot"}</span>
+                              <span>•</span>
+                              <span>
+                                {new Date(msg.timestamp).toLocaleTimeString("zh-CN", {
+                                  hour: "2-digit",
+                                  minute: "2-digit"
+                                })}
+                              </span>
+                            </div>
+                            <div
+                              className={`p-3 rounded-lg text-xs leading-relaxed max-w-[88%] select-text whitespace-normal break-words ${
+                                isUser
+                                  ? "bg-blue-600/25 border border-blue-500/20 text-slate-200"
+                                  : "bg-[#0A0F1D]/80 border border-[#1F2937] text-slate-300 markdown-body leading-relaxed space-y-2"
+                              }`}
+                            >
+                              {isUser ? (
+                                <p className="whitespace-pre-wrap font-mono">{msg.displayPrompt || msg.parts[0]?.text}</p>
+                              ) : (
+                                <Markdown>{msg.parts[0]?.text || ""}</Markdown>
+                              )}
+                            </div>
+
+                            {/* Copilot visual task execution log HUD */}
+                            {!isUser && msg.executedActions && msg.executedActions.length > 0 && (
+                              <div className="mt-2 w-[88%] p-3 rounded-lg bg-[#050B14]/90 border border-emerald-950/50 space-y-2.5 animate-in fade-in slide-in-from-top-1 duration-150 shrink-0 select-text">
+                                <div className="flex items-center gap-1.5 text-[10px] font-mono font-bold text-emerald-400 uppercase tracking-wider select-none">
+                                  <Sparkles className="w-3.5 h-3.5 text-emerald-400 animate-pulse" />
+                                  <span>Copilot 自动任务执行日志 ({msg.executedActions.length})</span>
+                                </div>
+                                <div className="space-y-2 font-mono text-[11px] select-text">
+                                  {msg.executedActions.map((action: any, aIdx: number) => (
+                                    <div key={aIdx} className="flex flex-col gap-1.5 p-2 bg-[#02050A] rounded border border-slate-900 select-text">
+                                      <div className="flex items-center justify-between gap-2 select-none">
+                                        <span className="flex items-center gap-1.5 font-bold text-slate-300 truncate text-[10px]">
+                                          {action.type === "create_file" || action.type === "write_file" ? "📁 写入文件" :
+                                           action.type === "mkdir" ? "📂 创建目录" :
+                                           action.type === "delete_file" ? "🗑️ 物理删除" :
+                                           action.type === "run_command" ? "⚙️ 运行命令" : "🛠️ 执行操作"}:
+                                        </span>
+                                        <span className={`px-1.5 py-0.5 rounded text-[8px] font-extrabold uppercase shrink-0 ${
+                                          action.success ? "bg-emerald-950/60 text-emerald-400 border border-emerald-800/40" : "bg-rose-950/60 text-rose-400 border border-rose-800/40"
+                                        }`}>
+                                          {action.success ? "成功" : "失败"}
+                                        </span>
+                                      </div>
+                                      <div className="text-blue-400 select-all break-all text-[10px] font-bold pl-1 border-l border-slate-800">
+                                        {action.path || action.command}
+                                      </div>
+                                      {action.error && (
+                                        <div className="text-rose-400 text-[10px] pl-1 border-l border-rose-500/50 mt-1">{action.error}</div>
+                                      )}
+                                      {action.type === "run_command" && action.output && (
+                                        <details className="mt-1 select-text">
+                                          <summary className="text-[10px] text-slate-500 hover:text-slate-300 cursor-pointer select-none">显示终端控制台输出...</summary>
+                                          <pre className="mt-1 p-2 bg-black text-slate-400 rounded text-[9px] max-h-32 overflow-y-auto whitespace-pre-wrap select-text selection:bg-slate-800">{action.output}</pre>
+                                        </details>
+                                      )}
+                                      {(action.type === "create_file" || action.type === "write_file") && (
+                                        <div className="flex items-center justify-between mt-1 pt-1.5 border-t border-slate-900/60 select-none">
+                                          <span className="text-[9px] text-slate-500">{action.size} 字符</span>
+                                          <button
+                                            type="button"
+                                            onClick={() => handleFileClick(action.path)}
+                                            className="px-2 py-0.5 bg-blue-950 hover:bg-blue-900 text-blue-300 border border-blue-900 rounded text-[10px] cursor-pointer transition-colors"
+                                          >
+                                            在编辑器打开
+                                          </button>
+                                        </div>
+                                      )}
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      });
+                    }
+
+                    if (aiLoading) {
+                      return (
+                        <div className="flex flex-col items-center justify-center py-20 gap-3">
+                          <div className="flex items-center gap-1">
+                            <span className="w-2 h-2 bg-blue-400 rounded-full animate-bounce duration-300 [animation-delay:-0.3s]" />
+                            <span className="w-2 h-2 bg-blue-400 rounded-full animate-bounce duration-300 [animation-delay:-0.15s]" />
+                            <span className="w-2 h-2 bg-blue-400 rounded-full animate-bounce duration-300" />
+                          </div>
+                          <span className="text-[10px] font-mono text-slate-500 uppercase tracking-wider animate-pulse">Copilot 正在聚合分析上下文...</span>
+                        </div>
+                      );
+                    }
+
+                    if (aiError) {
+                      return (
+                        <div className="p-3 rounded border border-rose-900/30 bg-rose-950/20 text-rose-400 text-xs font-mono whitespace-pre-wrap leading-relaxed">
+                          ❌ {aiError}
+                        </div>
+                      );
+                    }
+
+                    return (
+                      <div className="text-center py-24 text-slate-600 font-sans">
+                        <Sparkles className="w-8 h-8 text-slate-800 mx-auto mb-2 animate-pulse" />
+                        <p className="text-[10px] uppercase font-mono tracking-wider">AI Copilot Interactive Frame</p>
+                        <p className="text-[9px] text-slate-700 mt-1 max-w-[200px] mx-auto">点击一键分析或在下方输入框中向 AI 提问。</p>
+                      </div>
+                    );
+                  })()}
+
+                  {/* Typing Indicator */}
+                  {aiLoading && (() => {
+                    const activeSession = sessions.find(s => s.id === currentSessionId);
+                    return activeSession && activeSession.messages && activeSession.messages.length > 0;
+                  })() && (
+                    <div className="flex items-center gap-1.5 p-1 text-[10px] text-slate-500 font-mono animate-pulse">
+                      <span className="w-1.5 h-1.5 bg-blue-400 rounded-full animate-bounce duration-300" />
+                      <span>Copilot 正在回复中...</span>
+                    </div>
+                  )}
+
+                  {/* SELF HEALING CTA PANEL: If AI has optimized/fixed code, render code healing bar */}
+                  {hasExtractedCode && !aiLoading && (
+                    <div className="sticky bottom-0 left-0 right-0 p-2.5 border border-emerald-500/20 bg-emerald-950/30 rounded mt-5 flex flex-col gap-1.5 shadow-xl backdrop-blur-sm animate-in zoom-in-95 duration-150">
+                      <div className="flex items-center gap-1.5">
+                        <Check className="w-3.5 h-3.5 text-emerald-400" />
+                        <span className="text-[9px] font-mono text-emerald-400 font-bold uppercase">检测到 AI 推荐的新版完整代码</span>
+                      </div>
+                      <button
+                        onClick={handleApplyAiSuggestion}
+                        className="w-full py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold font-mono text-[10px] uppercase rounded cursor-pointer transition-all flex items-center justify-center gap-1 shadow shadow-emerald-950"
+                      >
+                        <Copy className="w-3 h-3" />
+                        <span>一键应用并覆盖编辑器代码</span>
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Ref marker for auto-scrolling */}
+                  <div ref={chatBottomRef} />
+                </div>
+
+                {/* Chat Input interface */}
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    if (customPrompt.trim()) handleCallAiCopilot("custom");
+                  }}
+                  className="p-2 border-t border-[#1F2937] bg-[#111827] flex gap-1.5 shrink-0"
                 >
-                  Ask
-                </button>
-              </form>
+                  <input
+                    type="text"
+                    disabled={aiLoading || (aiScope === "single" && !selectedFilePath)}
+                    placeholder={
+                      aiScope === "project"
+                        ? selectedProjectFiles.length > 0
+                          ? `提问勾选的 ${selectedProjectFiles.length} 个文件...`
+                          : "提问或一键全盘检索整个项目..."
+                        : selectedFilePath
+                        ? "关于此文件你有什么疑问？..."
+                        : "请先选择需要分析的文件"
+                    }
+                    value={customPrompt}
+                    onChange={(e) => setCustomPrompt(e.target.value)}
+                    className="flex-1 px-2.5 py-1.5 bg-[#020617] border border-[#1F2937] rounded text-slate-200 text-xs focus:outline-none focus:border-blue-500/50 disabled:opacity-50 placeholder-slate-700 font-mono"
+                  />
+                  <button
+                    type="submit"
+                    disabled={aiLoading || (aiScope === "single" && !selectedFilePath) || !customPrompt.trim()}
+                    className="px-2.5 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800 disabled:text-slate-600 text-white font-bold font-mono text-[10px] rounded cursor-pointer transition-colors"
+                  >
+                    Ask
+                  </button>
+                </form>
+              </div>
             </div>
           )}
 
@@ -1457,6 +1879,66 @@ run();
           </button>
         </form>
       </div>
+
+      {/* CUSTOM CONFIRM/ALERT DIALOG MODAL */}
+      {modal?.isOpen && (
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-[#020617]/85 backdrop-blur-sm p-4 animate-in fade-in duration-200" id="custom-modal-overlay">
+          <div className="bg-[#0F172A] border border-[#1F2937] rounded-lg shadow-2xl max-w-md w-full overflow-hidden animate-in zoom-in-95 duration-200" id="custom-modal-container">
+            {/* Header */}
+            <div className="p-4 border-b border-[#1F2937] bg-[#111827] flex items-center justify-between" id="custom-modal-header">
+              <h3 className="text-xs font-mono font-bold uppercase text-slate-300 flex items-center gap-2">
+                <ShieldAlert className="w-4 h-4 text-amber-500 shrink-0" />
+                {modal.title}
+              </h3>
+              <button
+                onClick={() => setModal(null)}
+                className="text-slate-500 hover:text-slate-300 transition-colors cursor-pointer"
+                id="custom-modal-close-btn"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            {/* Body */}
+            <div className="p-6" id="custom-modal-body">
+              <p className="text-xs text-slate-400 font-sans leading-relaxed whitespace-pre-line">
+                {modal.message}
+              </p>
+            </div>
+            {/* Footer */}
+            <div className="p-4 border-t border-[#1F2937] bg-[#111827]/60 flex justify-end gap-2" id="custom-modal-footer">
+              {modal.type === "confirm" ? (
+                <>
+                  <button
+                    onClick={() => setModal(null)}
+                    className="px-3.5 py-1.5 border border-[#1F2937] hover:bg-slate-800 text-slate-400 text-xs font-mono font-bold uppercase rounded cursor-pointer transition-colors"
+                    id="custom-modal-cancel-btn"
+                  >
+                    取消 / Cancel
+                  </button>
+                  <button
+                    onClick={() => {
+                      if (modal.onConfirm) modal.onConfirm();
+                      setModal(null);
+                    }}
+                    className="px-3.5 py-1.5 bg-rose-600 hover:bg-rose-500 border border-rose-500/20 text-white text-xs font-mono font-bold uppercase rounded cursor-pointer transition-colors"
+                    id="custom-modal-confirm-btn"
+                  >
+                    确认 / Confirm
+                  </button>
+                </>
+              ) : (
+                <button
+                  onClick={() => setModal(null)}
+                  className="px-4 py-1.5 bg-blue-600 hover:bg-blue-500 border border-blue-500/20 text-white text-xs font-mono font-bold uppercase rounded cursor-pointer transition-colors"
+                  id="custom-modal-ok-btn"
+                >
+                  好的 / OK
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
     </div>
   );

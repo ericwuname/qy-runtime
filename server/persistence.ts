@@ -730,3 +730,26 @@ export function getFileTree(dir: string, baseDir = WORKSPACE_DIR): any[] {
     return a.name.localeCompare(b.name);
   });
 }
+
+const CHAT_SESSIONS_FILE = path.resolve(process.cwd(), "chat_sessions.json");
+
+export function loadChatSessions(): any[] {
+  try {
+    if (fs.existsSync(CHAT_SESSIONS_FILE)) {
+      const data = fs.readFileSync(CHAT_SESSIONS_FILE, "utf-8");
+      return JSON.parse(data);
+    }
+  } catch (err) {
+    console.error("Error loading chat sessions:", err);
+  }
+  return [];
+}
+
+export function saveChatSessions(sessions: any[]) {
+  try {
+    fs.writeFileSync(CHAT_SESSIONS_FILE, JSON.stringify(sessions, null, 2), "utf-8");
+  } catch (err) {
+    console.error("Error saving chat sessions:", err);
+  }
+}
+
