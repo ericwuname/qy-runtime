@@ -26,7 +26,10 @@ import {
   Settings,
   HelpCircle,
   Image as ImageIcon,
-  Copy
+  Copy,
+  RotateCcw,
+  History,
+  ShieldAlert
 } from "lucide-react";
 import Markdown from "react-markdown";
 
@@ -49,6 +52,74 @@ export default function WorkspaceManager() {
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   
   // File tree states
+  const [treeViewMode, setTreeViewMode] = useState<"core" | "test" | "trash">("core");
+  const [trashItems, setTrashItems] = useState<any[]>([]);
+  const [trashLoading, setTrashLoading] = useState(false);
+
+  const fetchTrash = async () => {
+    setTrashLoading(true);
+    try {
+      const res = await fetch("/api/workspace/trash");
+      if (res.ok) {
+        const data = await res.json();
+        setTrashItems(data);
+      }
+    } catch (err) {
+      console.error("Error fetching trash items:", err);
+    } finally {
+      setTrashLoading(false);
+    }
+  };
+
+  const handleRestoreTrashItem = async (id: string) => {
+    try {
+      const res = await fetch("/api/workspace/trash/restore", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id })
+      });
+      if (res.ok) {
+        fetchTrash();
+        fetchFiles();
+      } else {
+        const data = await res.json();
+        alert(data.error || "还原失败");
+      }
+    } catch (err) {
+      console.error("Restore error:", err);
+    }
+  };
+
+  const handlePermanentDeleteTrashItem = async (id: string) => {
+    if (!confirm("⚠️ 彻底删除此项将无法再次恢复！确定要永久彻底删除它吗？")) return;
+    try {
+      const res = await fetch("/api/workspace/trash/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id })
+      });
+      if (res.ok) {
+        fetchTrash();
+      }
+    } catch (err) {
+      console.error("Permanent delete error:", err);
+    }
+  };
+
+  const handleEmptyTrash = async () => {
+    if (!confirm("🛑 确定要完全清空回收站吗？清空后，所有已暂存的项目都将被永久删除且无法恢复！")) return;
+    try {
+      const res = await fetch("/api/workspace/trash/empty", {
+        method: "POST"
+      });
+      if (res.ok) {
+        fetchTrash();
+      }
+    } catch (err) {
+      console.error("Empty trash error:", err);
+    }
+  };
+
   const [searchQuery, setSearchQuery] = useState("");
   const [collapsedPaths, setCollapsedPaths] = useState<Record<string, boolean>>({});
   const [newItemName, setNewItemName] = useState("");
@@ -89,7 +160,7 @@ export default function WorkspaceManager() {
   const [cleanStats, setCleanStats] = useState<{ deletedCount: number; releasedBytes: number } | null>(null);
 
   const handleCleanCache = async () => {
-    if (!confirm("确认要一键删除所有已完成/已失败任务关联的旧沙箱文件吗？此操作将安全释放系统存储空间，且不会影响任何正在执行的任务。")) return;
+    if (!confirm("🧪 确认要一键清理测试沙箱区域吗？\n\n此操作将安全清空 test_zone 目录下的所有临时文件并暂存到历史回收站中，不仅保障核心开发代码 100% 安全，还能随时在回收站中完美自愈恢复！")) return;
     setCleaning(true);
     setCleanStats(null);
     try {
@@ -103,7 +174,7 @@ export default function WorkspaceManager() {
           releasedBytes: data.releasedBytes
         });
         fetchFiles();
-        // Clear stats banner after 6 seconds
+        fetchTrash(); // Auto refresh trash list to reflect newly recycled files
         setTimeout(() => setCleanStats(null), 6000);
       } else {
         alert("清理失败，请重试或查看系统后台。");
@@ -134,7 +205,8 @@ export default function WorkspaceManager() {
 
   useEffect(() => {
     fetchFiles();
-  }, []);
+    fetchTrash();
+  }, [treeViewMode]);
 
   // Handle click on file
   const handleFileClick = async (path: string) => {
@@ -179,7 +251,13 @@ export default function WorkspaceManager() {
   // Delete file/folder
   const handleDeleteItem = async (e: React.MouseEvent, path: string) => {
     e.stopPropagation();
-    if (!confirm(`确认要彻底删除该项目吗? ${path}`)) return;
+    const isTestFile = path.startsWith("test_zone/") || path === "test_zone";
+    const confirmMessage = isTestFile 
+      ? `确认要将测试文件移入历史回收站吗？\n\n项目: ${path}`
+      : `⚠️ 警告：您正在删除【核心开发文件】！\n该操作虽然会将文件安全移入历史回收站，但可能导致当前项目架构或运行中断。\n\n确认要回收此核心文件吗？\n项目: ${path}`;
+    
+    if (!confirm(confirmMessage)) return;
+
     try {
       const res = await fetch("/api/workspace/delete", {
         method: "POST",
@@ -193,6 +271,12 @@ export default function WorkspaceManager() {
           setOriginalContent("");
         }
         fetchFiles();
+        if (treeViewMode === "trash") {
+          fetchTrash();
+        }
+      } else {
+        const data = await res.json();
+        alert(data.error || "删除失败");
       }
     } catch (err) {
       console.error("Error deleting item:", err);
@@ -204,10 +288,15 @@ export default function WorkspaceManager() {
     e.preventDefault();
     if (!newItemName.trim() || !newItemType) return;
 
+    // Auto-prefix with test_zone if active tab is Test Zone
+    const targetPath = treeViewMode === "test"
+      ? (newItemName.startsWith("test_zone/") ? newItemName : `test_zone/${newItemName}`)
+      : newItemName;
+
     const endpoint = newItemType === "file" ? "/api/workspace/write" : "/api/workspace/mkdir";
     const body = newItemType === "file" 
-      ? { path: newItemName, content: "" }
-      : { path: newItemName };
+      ? { path: targetPath, content: "" }
+      : { path: targetPath };
 
     try {
       const res = await fetch(endpoint, {
@@ -216,13 +305,15 @@ export default function WorkspaceManager() {
         body: JSON.stringify(body)
       });
       if (res.ok) {
-        const createdPath = newItemName;
         setNewItemName("");
         setNewItemType(null);
         fetchFiles();
         if (newItemType === "file") {
-          handleFileClick(createdPath);
+          handleFileClick(targetPath);
         }
+      } else {
+        const data = await res.json();
+        alert(data.error || "创建失败");
       }
     } catch (err) {
       console.error("Error creating item:", err);
@@ -594,7 +685,14 @@ run();
     );
   };
 
-  const filteredFiles = filterFileTree(files, searchQuery);
+  const testZoneNode = files.find(node => node.name === "test_zone" && node.isDirectory);
+  const testZoneChildren = testZoneNode?.children || [];
+
+  const displayNodes = treeViewMode === "test" 
+    ? testZoneChildren 
+    : files.filter(node => node.name !== "test_zone");
+
+  const filteredFiles = filterFileTree(displayNodes, searchQuery);
   const isDirty = selectedFilePath && fileContent !== originalContent;
   const hasExtractedCode = extractCodeFromMarkdown(aiResponse) !== null;
 
@@ -613,7 +711,7 @@ run();
             <button
               onClick={handleCleanCache}
               disabled={cleaning}
-              title="一键安全清理不活跃的缓存垃圾文件"
+              title="一键安全清理测试沙箱临时文件，并进入历史回收站"
               className="px-2 py-0.5 hover:bg-rose-950/20 text-rose-400 hover:text-rose-300 disabled:opacity-50 disabled:cursor-not-allowed rounded transition-colors cursor-pointer flex items-center gap-1 text-[9px] uppercase font-mono font-bold border border-rose-500/10 hover:border-rose-500/30"
             >
               <Trash2 className={`w-3 h-3 text-rose-400 ${cleaning ? "animate-pulse" : ""}`} />
@@ -630,6 +728,51 @@ run();
           </div>
         </div>
 
+        {/* Navigation Tabs */}
+        <div className="flex border-b border-[#1F2937] bg-[#020617]/50 p-1 gap-1">
+          <button
+            onClick={() => setTreeViewMode("core")}
+            className={`flex-1 py-1 px-1 rounded text-[10px] font-mono font-bold uppercase transition-all cursor-pointer flex items-center justify-center gap-1 ${
+              treeViewMode === "core"
+                ? "bg-[#1E293B] text-blue-400 border border-[#334155]"
+                : "text-slate-500 hover:text-slate-300 border border-transparent"
+            }`}
+            title="查看和编辑项目的核心开发逻辑与代码"
+          >
+            <Code2 className="w-3 h-3" />
+            <span>核心逻辑</span>
+          </button>
+          <button
+            onClick={() => setTreeViewMode("test")}
+            className={`flex-1 py-1 px-1 rounded text-[10px] font-mono font-bold uppercase transition-all cursor-pointer flex items-center justify-center gap-1 ${
+              treeViewMode === "test"
+                ? "bg-amber-950/40 text-amber-400 border border-amber-500/20"
+                : "text-slate-500 hover:text-slate-300 border border-transparent"
+            }`}
+            title="测试临时文件专用存储区域"
+          >
+            <Sparkles className="w-3 h-3" />
+            <span>测试沙箱</span>
+          </button>
+          <button
+            onClick={() => setTreeViewMode("trash")}
+            className={`flex-1 py-1 px-1 rounded text-[10px] font-mono font-bold uppercase transition-all cursor-pointer flex items-center justify-center gap-1 ${
+              treeViewMode === "trash"
+                ? "bg-rose-950/30 text-rose-400 border border-rose-500/15"
+                : "text-slate-500 hover:text-slate-300 border border-transparent"
+            }`}
+            title="查看回收站文件并支持安全还原"
+          >
+            <History className="w-3 h-3" />
+            <span>回收站</span>
+            {trashItems.length > 0 && (
+              <span className="bg-rose-500 text-white rounded-full text-[8px] px-1 shrink-0">
+                {trashItems.length}
+              </span>
+            )}
+          </button>
+        </div>
+
         {/* Search & Toolbars */}
         <div className="p-2 border-b border-[#1F2937] bg-[#0A0B0E]/20 space-y-2">
           {/* Search bar */}
@@ -637,64 +780,68 @@ run();
             <Search className="absolute left-2.5 top-2 w-3.5 h-3.5 text-slate-500" />
             <input
               type="text"
-              placeholder="搜索工作区文件..."
+              placeholder={treeViewMode === "trash" ? "搜索暂存垃圾..." : "搜索工作区文件..."}
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               className="w-full pl-8 pr-3 py-1 bg-[#020617] border border-[#1F2937]/80 rounded text-slate-300 text-xs focus:outline-none focus:border-blue-500/50 placeholder-slate-700 font-mono"
             />
           </div>
 
-          {/* Multi-file batch controls */}
-          <div className="flex items-center justify-between text-[9px] text-slate-500 font-mono pt-0.5 pb-1 px-1">
-            <span className="text-[8px] uppercase font-bold text-slate-600 tracking-wider">Project Scope:</span>
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => {
-                  const allPaths: string[] = [];
-                  const collect = (nodes: FileNode[]) => {
-                    for (const n of nodes) {
-                      if (!n.isDirectory) allPaths.push(n.path);
-                      if (n.children) collect(n.children);
-                    }
-                  };
-                  collect(files);
-                  setSelectedProjectFiles(allPaths);
-                }}
-                className="hover:text-blue-400 font-bold transition-colors cursor-pointer"
-                title="一键选择沙箱内所有脚本和配置文件进行深度交叉分析"
-              >
-                全选 ({files.reduce((acc, n) => acc + getAllFilePathsUnderNode(n).length, 0)}个)
-              </button>
-              <span className="text-slate-800">|</span>
-              <button
-                type="button"
-                onClick={() => setSelectedProjectFiles([])}
-                className="hover:text-rose-400 font-bold transition-colors cursor-pointer"
-                title="清空当前勾选的文件范围"
-              >
-                清空
-              </button>
+          {/* Multi-file batch controls - only relevant for files, not trash */}
+          {treeViewMode !== "trash" && (
+            <div className="flex items-center justify-between text-[9px] text-slate-500 font-mono pt-0.5 pb-1 px-1">
+              <span className="text-[8px] uppercase font-bold text-slate-600 tracking-wider">Project Scope:</span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const allPaths: string[] = [];
+                    const collect = (nodes: FileNode[]) => {
+                      for (const n of nodes) {
+                        if (!n.isDirectory) allPaths.push(n.path);
+                        if (n.children) collect(n.children);
+                      }
+                    };
+                    collect(displayNodes);
+                    setSelectedProjectFiles(allPaths);
+                  }}
+                  className="hover:text-blue-400 font-bold transition-colors cursor-pointer"
+                  title="一键选择该视图下所有脚本和配置文件进行深度交叉分析"
+                >
+                  全选 ({displayNodes.reduce((acc, n) => acc + getAllFilePathsUnderNode(n).length, 0)}个)
+                </button>
+                <span className="text-slate-800">|</span>
+                <button
+                  type="button"
+                  onClick={() => setSelectedProjectFiles([])}
+                  className="hover:text-rose-400 font-bold transition-colors cursor-pointer"
+                  title="清空当前勾选的文件范围"
+                >
+                  清空
+                </button>
+              </div>
             </div>
-          </div>
+          )}
 
           {/* Create Buttons */}
-          <div className="flex gap-1.5">
-            <button
-              onClick={() => setNewItemType("file")}
-              className="flex-1 py-1 px-1.5 bg-slate-800 hover:bg-slate-700 text-[10px] font-mono font-bold uppercase text-slate-300 rounded flex items-center justify-center gap-1 cursor-pointer transition-colors"
-            >
-              <FilePlus className="w-3 h-3" />
-              + File
-            </button>
-            <button
-              onClick={() => setNewItemType("folder")}
-              className="flex-1 py-1 px-1.5 bg-slate-800 hover:bg-slate-700 text-[10px] font-mono font-bold uppercase text-slate-300 rounded flex items-center justify-center gap-1 cursor-pointer transition-colors"
-            >
-              <FolderPlus className="w-3 h-3" />
-              + Folder
-            </button>
-          </div>
+          {treeViewMode !== "trash" && (
+            <div className="flex gap-1.5">
+              <button
+                onClick={() => setNewItemType("file")}
+                className="flex-1 py-1 px-1.5 bg-slate-800 hover:bg-slate-700 text-[10px] font-mono font-bold uppercase text-slate-300 rounded flex items-center justify-center gap-1 cursor-pointer transition-colors"
+              >
+                <FilePlus className="w-3 h-3" />
+                + File
+              </button>
+              <button
+                onClick={() => setNewItemType("folder")}
+                className="flex-1 py-1 px-1.5 bg-slate-800 hover:bg-slate-700 text-[10px] font-mono font-bold uppercase text-slate-300 rounded flex items-center justify-center gap-1 cursor-pointer transition-colors"
+              >
+                <FolderPlus className="w-3 h-3" />
+                + Folder
+              </button>
+            </div>
+          )}
         </div>
 
         {/* Clean Cache Notification Banner */}
@@ -703,8 +850,7 @@ run();
             <span className="flex items-center gap-1">
               <span>✨</span>
               <span>
-                成功释放：删除了 <strong>{cleanStats.deletedCount}</strong> 个过期缓存文件 
-                ({Math.round(cleanStats.releasedBytes / 1024 * 10) / 10} KB 已释放)
+                安全清理：回收了测试区域内 <strong>{cleanStats.deletedCount}</strong> 个测试文件并移入回收站
               </span>
             </span>
             <button onClick={() => setCleanStats(null)} className="p-0.5 hover:bg-emerald-900/30 rounded text-emerald-500">
@@ -740,15 +886,94 @@ run();
           </form>
         )}
 
-        {/* Recursive Tree Body */}
-        <div className="flex-1 overflow-y-auto p-3 bg-[#0A0F1D]/30">
-          {loading && files.length === 0 ? (
+        {/* Recursive Tree Body / Trash List */}
+        <div className="flex-1 overflow-y-auto p-3 bg-[#0A0F1D]/30 custom-scrollbar">
+          {treeViewMode === "trash" ? (
+            trashLoading ? (
+              <div className="text-center py-12 text-xs text-slate-600 animate-pulse font-mono">
+                [SYSTEM_SYNC] 读取回收站历史...
+              </div>
+            ) : trashItems.length === 0 ? (
+              <div className="text-center py-12 px-4 text-xs text-slate-600 font-mono flex flex-col items-center gap-2">
+                <Check className="w-5 h-5 text-emerald-500" />
+                <span>回收站为空，系统干干净净</span>
+                <span className="text-[9px] text-slate-700 leading-normal">清理的测试文件会存入此处，支持物理还原自愈</span>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between text-[10px] font-mono text-slate-500 pb-1.5 border-b border-[#1F2937]/60">
+                  <span>已暂存项目 ({trashItems.filter(item => item.name.toLowerCase().includes(searchQuery.toLowerCase())).length} 个)</span>
+                  <button
+                    onClick={handleEmptyTrash}
+                    className="text-rose-400 hover:text-rose-300 font-bold transition-colors cursor-pointer"
+                  >
+                    一键清空
+                  </button>
+                </div>
+                <div className="space-y-1.5 max-h-[480px] overflow-y-auto">
+                  {trashItems
+                    .filter(item => item.name.toLowerCase().includes(searchQuery.toLowerCase()))
+                    .map((item) => (
+                      <div
+                        key={item.id}
+                        className="group p-2 rounded bg-[#0A0B0E]/40 border border-[#1F2937]/45 hover:border-slate-800 transition-all text-xs"
+                      >
+                        <div className="flex items-start gap-1.5 justify-between">
+                          <div className="flex items-start gap-1.5 overflow-hidden w-full">
+                            {item.isDirectory ? (
+                              <Folder className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+                            ) : (
+                              <FileCode className="w-4 h-4 text-slate-400 shrink-0 mt-0.5" />
+                            )}
+                            <div className="overflow-hidden w-full text-[11px]">
+                              <p className="font-mono text-slate-200 truncate font-semibold" title={item.name}>
+                                {item.name}
+                              </p>
+                              <p className="text-[9px] text-slate-500 truncate" title={`原路径: ${item.originalPath}`}>
+                                原: {item.originalPath}
+                              </p>
+                              <p className="text-[8px] text-slate-600 font-mono mt-0.5">
+                                {new Date(item.deletedAt).toLocaleString("zh-CN", { hour12: false })}
+                              </p>
+                            </div>
+                          </div>
+                          
+                          <div className="flex gap-1 shrink-0">
+                            <button
+                              onClick={() => handleRestoreTrashItem(item.id)}
+                              className="p-1 hover:bg-emerald-950/30 text-emerald-500 hover:text-emerald-400 rounded transition-colors cursor-pointer"
+                              title="一键物理还原并自愈"
+                            >
+                              <RotateCcw className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              onClick={() => handlePermanentDeleteTrashItem(item.id)}
+                              className="p-1 hover:bg-rose-950/30 text-rose-500 hover:text-rose-400 rounded transition-colors cursor-pointer"
+                              title="永久彻底删除"
+                            >
+                              <X className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                </div>
+              </div>
+            )
+          ) : loading && files.length === 0 ? (
             <div className="text-center py-12 text-xs text-slate-600 animate-pulse font-mono">
-              [SYSTEM_SYNC] 同步目录节点中...
+              [SYSTEM_SYNC] 同步工作区节点中...
             </div>
-          ) : files.length === 0 ? (
+          ) : filteredFiles.length === 0 ? (
             <div className="text-center py-12 text-xs text-slate-600 font-mono">
-              工作区为空，可一键在模版页生成
+              {treeViewMode === "test" ? (
+                <div className="flex flex-col items-center gap-1 px-4 leading-normal">
+                  <span className="text-slate-500">测试沙箱暂无文件</span>
+                  <span className="text-[9px] text-slate-700">可通过上方 "+ File" 在本区域创建实验脚本，安全清爽！</span>
+                </div>
+              ) : (
+                "工作区为空，可一键在模版页生成"
+              )}
             </div>
           ) : (
             renderFileTree(filteredFiles)

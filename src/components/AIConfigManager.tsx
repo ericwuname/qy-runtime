@@ -16,7 +16,9 @@ import {
   ChevronUp,
   Activity,
   Folder,
-  FolderOpen
+  FolderOpen,
+  Eye,
+  EyeOff
 } from "lucide-react";
 
 interface AIConfigManagerProps {
@@ -48,6 +50,10 @@ export default function AIConfigManager({ onConfigChanged }: AIConfigManagerProp
   const [systemGroupExpanded, setSystemGroupExpanded] = useState(true);
   const [customGroupExpanded, setCustomGroupExpanded] = useState(true);
   const [expandedProviders, setExpandedProviders] = useState<Record<string, boolean>>({});
+  
+  // API Key visibility toggles
+  const [showApiKey, setShowApiKey] = useState<Record<string, boolean>>({});
+  const [showNewProviderApiKey, setShowNewProviderApiKey] = useState(false);
   
   const toggleExpandProvider = (providerKey: string) => {
     setExpandedProviders(prev => {
@@ -353,6 +359,22 @@ export default function AIConfigManager({ onConfigChanged }: AIConfigManagerProp
           ...prev, 
           [providerKey]: { success: true, message: data.message || "连接测试成功！" } 
         }));
+
+        // Auto-save the config immediately on successful connection test to prevent losing keys on page reloads/refreshes
+        try {
+          const saveRes = await fetch("/api/config", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(config)
+          });
+          if (saveRes.ok) {
+            const saveData = await saveRes.json();
+            setConfig(saveData.config || config);
+            onConfigChanged();
+          }
+        } catch (saveErr) {
+          console.error("Auto-saving config on successful connection test failed:", saveErr);
+        }
       } else {
         setTestResult(prev => ({ 
           ...prev, 
@@ -930,14 +952,30 @@ export default function AIConfigManager({ onConfigChanged }: AIConfigManagerProp
                 <label className="text-[10px] font-mono text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
                   <Key className="w-3.5 h-3.5 text-slate-500" /> API Access Token / Key
                 </label>
-                <input
-                  type="password"
-                  placeholder={p.key === "local_llm" ? "无需凭证 - 免密运行" : "输入对应平台的 API Key 凭证保护锁"}
-                  disabled={p.key === "local_llm"}
-                  value={pConfig.apiKey}
-                  onChange={(e) => handleProviderChange(p.key, "apiKey", e.target.value)}
-                  className="w-full px-2.5 py-1.5 bg-[#0F172A] border border-[#1F2937] text-xs font-mono rounded text-slate-300 placeholder-slate-600 focus:outline-none focus:border-blue-500/50"
-                />
+                <div className="relative flex items-center">
+                  <input
+                    type={showApiKey[p.key] ? "text" : "password"}
+                    autoComplete="new-password"
+                    placeholder={p.key === "local_llm" ? "无需凭证 - 免密运行" : "输入对应平台的 API Key 凭证保护锁"}
+                    disabled={p.key === "local_llm"}
+                    value={pConfig.apiKey}
+                    onChange={(e) => handleProviderChange(p.key, "apiKey", e.target.value)}
+                    className="w-full pl-2.5 pr-8 py-1.5 bg-[#0F172A] border border-[#1F2937] text-xs font-mono rounded text-slate-300 placeholder-slate-600 focus:outline-none focus:border-blue-500/50"
+                  />
+                  {p.key !== "local_llm" && (
+                    <button
+                      type="button"
+                      onClick={() => setShowApiKey(prev => ({ ...prev, [p.key]: !prev[p.key] }))}
+                      className="absolute right-2 text-slate-500 hover:text-slate-300 focus:outline-none"
+                    >
+                      {showApiKey[p.key] ? (
+                        <EyeOff className="w-4 h-4" />
+                      ) : (
+                        <Eye className="w-4 h-4" />
+                      )}
+                    </button>
+                  )}
+                </div>
               </div>
 
               {/* Base URL */}
@@ -1226,13 +1264,27 @@ export default function AIConfigManager({ onConfigChanged }: AIConfigManagerProp
                   <label className="text-[10px] font-mono text-slate-400 uppercase tracking-wider flex items-center gap-1">
                     API Key / Token
                   </label>
-                  <input
-                    type="password"
-                    placeholder="例如: sk-..."
-                    value={newProviderApiKey}
-                    onChange={(e) => setNewProviderApiKey(e.target.value)}
-                    className="w-full px-2.5 py-1.5 bg-[#0F172A] border border-[#1F2937] text-xs font-mono rounded text-slate-300 placeholder-slate-700 focus:outline-none focus:border-blue-500/50"
-                  />
+                  <div className="relative flex items-center">
+                    <input
+                      type={showNewProviderApiKey ? "text" : "password"}
+                      autoComplete="new-password"
+                      placeholder="例如: sk-..."
+                      value={newProviderApiKey}
+                      onChange={(e) => setNewProviderApiKey(e.target.value)}
+                      className="w-full pl-2.5 pr-8 py-1.5 bg-[#0F172A] border border-[#1F2937] text-xs font-mono rounded text-slate-300 placeholder-slate-700 focus:outline-none focus:border-blue-500/50"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowNewProviderApiKey(prev => !prev)}
+                      className="absolute right-2 text-slate-500 hover:text-slate-300 focus:outline-none"
+                    >
+                      {showNewProviderApiKey ? (
+                        <EyeOff className="w-4 h-4" />
+                      ) : (
+                        <Eye className="w-4 h-4" />
+                      )}
+                    </button>
+                  </div>
                 </div>
 
                 {/* Description */}

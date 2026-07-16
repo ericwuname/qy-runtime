@@ -11,6 +11,71 @@ import { executeTaskBackground, resumeTaskBackground } from "./agent-loop";
 
 const WORKSPACE_DIR = path.resolve(process.cwd(), "workspace");
 
+const TRASH_DIR = path.join(WORKSPACE_DIR, ".trash");
+const TRASH_FILES_DIR = path.join(TRASH_DIR, "files");
+const TRASH_METADATA_FILE = path.join(TRASH_DIR, "metadata.json");
+
+interface TrashItem {
+  id: string;
+  name: string;
+  originalPath: string;
+  deletedAt: string;
+  size: number;
+  isDirectory: boolean;
+}
+
+function ensureTrashDirs() {
+  if (!fs.existsSync(TRASH_DIR)) {
+    fs.mkdirSync(TRASH_DIR, { recursive: true });
+  }
+  if (!fs.existsSync(TRASH_FILES_DIR)) {
+    fs.mkdirSync(TRASH_FILES_DIR, { recursive: true });
+  }
+  if (!fs.existsSync(TRASH_METADATA_FILE)) {
+    fs.writeFileSync(TRASH_METADATA_FILE, "[]", "utf-8");
+  }
+}
+
+function loadTrashMetadata(): TrashItem[] {
+  ensureTrashDirs();
+  try {
+    const data = fs.readFileSync(TRASH_METADATA_FILE, "utf-8");
+    return JSON.parse(data);
+  } catch (e) {
+    return [];
+  }
+}
+
+function saveTrashMetadata(items: TrashItem[]) {
+  ensureTrashDirs();
+  fs.writeFileSync(TRASH_METADATA_FILE, JSON.stringify(items, null, 2), "utf-8");
+}
+
+function autoPurgeTrash() {
+  try {
+    ensureTrashDirs();
+    const items = loadTrashMetadata();
+    const now = Date.now();
+    const activeItems: TrashItem[] = [];
+    const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
+
+    for (const item of items) {
+      const deletedTime = new Date(item.deletedAt).getTime();
+      if (now - deletedTime > sevenDaysMs) {
+        const trashPath = path.join(TRASH_FILES_DIR, item.id);
+        if (fs.existsSync(trashPath)) {
+          fs.rmSync(trashPath, { recursive: true, force: true });
+        }
+      } else {
+        activeItems.push(item);
+      }
+    }
+    saveTrashMetadata(activeItems);
+  } catch (err) {
+    console.error("Error auto purging trash:", err);
+  }
+}
+
 export function registerRoutes(app: express.Express, getActiveTasks: () => any[], setActiveTasks: (tasks: any[]) => void) {
   
   // 0. Configuration Management APIs
@@ -521,7 +586,27 @@ export function registerRoutes(app: express.Express, getActiveTasks: () => any[]
     }
 
     const currentDisk = loadAIConfig();
+
+    // Securely print configuration lifecycle logs to terminal
+    console.log("[CONFIG SAVE] Received configuration save request. Active provider:", submittedConfig.activeProvider);
+    for (const pName of Object.keys(submittedConfig.providers)) {
+      const key = submittedConfig.providers[pName].apiKey;
+      const keyLen = key ? key.length : 0;
+      const isMasked = key === "******";
+      console.log(`[CONFIG SAVE] Provider [${pName}]: Submitted API Key len = ${keyLen}, isMasked = ${isMasked}`);
+    }
+
     const merged = mergeSubmittedConfig(submittedConfig, currentDisk);
+
+    console.log("[CONFIG SAVE] Merged with current disk config.");
+    for (const pName of Object.keys(merged.providers)) {
+      const key = merged.providers[pName].apiKey;
+      const keyLen = key ? key.length : 0;
+      const isMasked = key === "******";
+      const prefix = key && keyLen > 4 ? key.substring(0, 4) : "";
+      const suffix = key && keyLen > 4 ? key.substring(keyLen - 4) : "";
+      console.log(`[CONFIG SAVE] Provider [${pName}]: Merged API Key len = ${keyLen}, isMasked = ${isMasked}, pattern = ${prefix}...${suffix}`);
+    }
 
     const activeP = merged.activeProvider;
     if (activeP && merged.providers[activeP]) {
@@ -877,8 +962,18 @@ Do not include any system metadata. Keep it concise, helpful, and direct.`;
   // 2. Sandbox File Explorer APIs
   app.get("/api/workspace/files", (req, res) => {
     try {
+      // Ensure test_zone folder exists
+      const testZoneDir = path.join(WORKSPACE_DIR, "test_zone");
+      if (!fs.existsSync(testZoneDir)) {
+        fs.mkdirSync(testZoneDir, { recursive: true });
+      }
+
       const fileTree = getFileTree(WORKSPACE_DIR);
-      res.json(fileTree);
+      // Filter out `.trash` or any other dot folders from the top level
+      const filteredTree = fileTree.filter(node => {
+        return node.name !== ".trash" && !node.name.startsWith(".");
+      });
+      res.json(filteredTree);
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
@@ -932,19 +1027,47 @@ Do not include any system metadata. Keep it concise, helpful, and direct.`;
   app.post("/api/workspace/delete", (req, res) => {
     const { path: relPath } = req.body;
     if (!relPath) return res.status(400).json({ error: "Missing path" });
+    
+    // Prevent deleting trash directory or test_zone itself
+    if (relPath.startsWith(".trash") || relPath === ".trash") {
+      return res.status(400).json({ error: "不能直接删除回收站系统目录" });
+    }
+    if (relPath === "test_zone" || relPath === "test_zone/") {
+      return res.status(400).json({ error: "测试区域目录（test_zone）受系统保护，请勿删除。您可以使用顶部清理按钮一键回收其内所有测试文件。" });
+    }
+
     try {
       const itemPath = safePath(relPath);
       if (!fs.existsSync(itemPath)) {
         return res.status(404).json({ error: "Path not found" });
       }
+
+      ensureTrashDirs();
       const stat = fs.statSync(itemPath);
-      if (stat.isDirectory()) {
-        fs.rmSync(itemPath, { recursive: true, force: true });
-      } else {
-        fs.unlinkSync(itemPath);
-      }
-      res.json({ success: true, message: "Deleted successfully" });
+      const timestamp = Date.now();
+      const filename = path.basename(itemPath);
+      const trashId = `${timestamp}_${filename}`;
+      const destPath = path.join(TRASH_FILES_DIR, trashId);
+
+      // Move physically to trash files
+      fs.renameSync(itemPath, destPath);
+
+      // Save metadata
+      const items = loadTrashMetadata();
+      const newItem: TrashItem = {
+        id: trashId,
+        name: filename,
+        originalPath: relPath.replace(/\\/g, "/"),
+        deletedAt: new Date().toISOString(),
+        size: stat.isDirectory() ? 4096 : stat.size,
+        isDirectory: stat.isDirectory()
+      };
+      items.push(newItem);
+      saveTrashMetadata(items);
+
+      res.json({ success: true, message: "已安全移入历史回收站", trashItem: newItem });
     } catch (error: any) {
+      console.error("Delete failed, moving to trash error:", error);
       res.status(500).json({ error: error.message });
     }
   });
@@ -1072,67 +1195,171 @@ Do not include any system metadata. Keep it concise, helpful, and direct.`;
         return res.status(400).json({ error: "No text-based code or log files found in the active context" });
       }
 
+      // Helper function to build a beautiful ASCII directory tree of the workspace
+      const buildTreeString = (dir: string, prefix: string = ""): string => {
+        let tree = "";
+        try {
+          if (!fs.existsSync(dir)) return tree;
+          const list = fs.readdirSync(dir);
+          const items = list.filter(item => !item.startsWith("."));
+          items.sort((a, b) => {
+            let aIsDir = false;
+            let bIsDir = false;
+            try { aIsDir = fs.statSync(path.join(dir, a)).isDirectory(); } catch(_) {}
+            try { bIsDir = fs.statSync(path.join(dir, b)).isDirectory(); } catch(_) {}
+            if (aIsDir && !bIsDir) return -1;
+            if (!aIsDir && bIsDir) return 1;
+            return a.localeCompare(b);
+          });
+
+          items.forEach((item, index) => {
+            const isLast = index === items.length - 1;
+            const fullPath = path.join(dir, item);
+            let isDir = false;
+            try { isDir = fs.statSync(fullPath).isDirectory(); } catch(_) {}
+            const marker = isLast ? "└── " : "├── ";
+            
+            if (isDir) {
+              if (item !== "node_modules" && item !== "dist") {
+                tree += `${prefix}${marker}${item}/\n`;
+                tree += buildTreeString(fullPath, prefix + (isLast ? "    " : "│   "));
+              }
+            } else {
+              tree += `${prefix}${marker}${item}\n`;
+            }
+          });
+        } catch (e) {
+          console.error("Error building tree string:", e);
+        }
+        return tree;
+      };
+
       let promptText = "";
       if (isProjectScope) {
         const fileSummaries = targetFiles.map(f => `--- 文件路径: ${f.path} ---\n${f.content}`).join("\n\n");
+        const workspaceTree = buildTreeString(WORKSPACE_DIR) || "├── (根目录未包含子文件)";
         
         if (action === "explain") {
-          promptText = `你是一个资深的软件架构专家。请对当前沙箱项目的多文件系统进行**深度宏观解读**、**拓扑结构解析**与**依赖流程分析**。
-          
-当前项目包含以下核心文件：
+          promptText = `你是一个顶尖的软件系统架构专家和首席系统分析师。请对当前沙箱项目的多文件系统进行**深度宏观解构**、**拓扑依赖提炼**与**核心生命周期数据流分析**。
+
+📂 【工作区全景目录拓扑】
+\`\`\`text
+workspace/
+${workspaceTree}
+\`\`\`
+
+当前已加载分析的核心文件上下文：
 ${targetFiles.map(f => `- ${f.path}`).join("\n")}
 
 各文件具体源码内容如下：
 ${fileSummaries}
 
-请提供：
-1. **系统架构与职责分工**: 分析项目的整体架构（如：数据采集、特征计算、模型运行等），详细说明各文件的核心职责和协同机制。
-2. **核心业务数据流**: 绘制/详细文字描述数据流或调用链路，说明数据是如何在文件之间流转和演变的。
-3. **全局协同优化建议**: 指出架构层面任何可优化、解耦或提升健壮性的方向。
-请使用结构清晰、排版美观、富有科技感的 Markdown 格式输出（建议使用中英双语核心术语，全中文解析）。`;
+请提供一份极其专业、结构严密、具备高度科技感的全方位解构报告，包含以下核心版块：
+
+### 1. 📂 架构全景与模块职责 (Architecture & Module Responsibilities)
+- **物理与逻辑架构层级**：清晰归纳当前项目的架构模式（如：分层架构、事件驱动、MVC、管道-过滤器等）。
+- **组件职责精析表格**：以精细的 Markdown 表格形式列出分析中的每个文件，包含：【文件路径】、【核心定位/职责描述】、【关键方法/函数API】和【强依赖/协作项】。
+
+### 2. 🔗 拓扑依赖网格 (Topology & Dependency Graph)
+- **依赖调用关系**：使用专业的 **Mermaid 流程图** (\`graph TD\` 或 \`flowchart TD\`) 描述各文件之间的底层通信关系（例如：前端页面 -> HTTP API 路由 -> 工具调用链）。
+- **设计缺陷自查**：剖析现有依赖网络中是否存在不合理的“紧耦合点”、“跨层级越权调用”或“循环依赖隐患”。
+
+### 3. ⚡ 核心业务生命周期与数据流 (Data Pipeline & Lifecycles)
+- **关键业务流分析**：描述用户操作输入后，数据是如何在各个文件之间流转、中转处理、状态更新以及被持久化或导出的（请精确关联到具体变量名、JSON 契约字段或函数方法）。
+- **多端一致性审查**：分析跨文件（如前后台、后台与存储介质）传递时，是否存在数据冗余、数据边界混乱或并发时序不同步的隐患。
+
+### 4. 💎 架构演进与优化路线图 (Architectural Evolution Roadmap)
+- 给出 3 个高含金量的、可逐步解耦或增强鲁棒性的架构重构建议。`;
         } else if (action === "optimize") {
-          promptText = `你是一个精通系统重构和性能调优的首席架构师。请针对当前项目的多文件协同场景，进行深度审查并输出**多文件重构及全局优化方案**。
+          promptText = `你是一个精通系统重构和性能调优的顶级首席架构师。请针对当前项目的多文件协同场景，进行深度审查并输出**多文件协同重构及全局性能调优方案**。
 
-当前项目包含以下核心文件：
+📂 【工作区全景目录拓扑】
+\`\`\`text
+workspace/
+${workspaceTree}
+\`\`\`
+
+当前已加载分析的核心文件上下文：
 ${targetFiles.map(f => `- ${f.path}`).join("\n")}
 
 各文件具体源码内容如下：
 ${fileSummaries}
 
-请提供：
-1. **多文件协同重构方案**: 分析各文件间的依赖、职责，指出冗余或不合理的地方，提出优化重构思路。
-2. **重构后的全局架构与协同流程**: 说明重构后文件结构如何演变、消息/数据如何流转。
-3. **关键文件重构建议**: 提供各文件的优化方向、架构建议或局部的重构范式。`;
+请提供一份极具落地价值、契合现代软件工程高水准的重构调优白皮书，包含以下核心版块：
+
+### 1. 🎯 架构冗余与技术债清单 (Architecture Debt Ledger)
+- 识别项目在设计层面（如：模块化不足、职责不清、硬编码、回调地狱、冗余计算等）的核心弊端，指出对应的代码位置并阐明理由。
+
+### 2. 🚀 性能与可维护性调优方案 (Optimization Blueprint)
+- **模块化解耦方案**：说明如何合理抽取公共辅助类（Utils）、高复用服务或状态管理单元。
+- **并发与异步处理**：针对 I/O 阻塞、耗时轮询、同步阻塞等场景给出具体的非阻塞与高并发异步设计意见。
+
+### 3. 🛠️ 优雅重构对照设计 (Refactoring Blueprint)
+- 针对需要重构的模块，展示清晰的【重构前 vs 重构后】设计变化对比，并提供符合最佳实践的、**完整且可直接无缝替换的重构代码块**。
+- 重构代码须包裹在精确的代码块（如 \`\`\`typescript ... \`\`\`）中，确保逻辑无缺失、格式精美，且不破坏现有核心业务契约。`;
         } else if (action === "fix-bugs") {
-          promptText = `你是一个卓越的白盒安全专家和 Debug 专家。请对当前沙箱项目的多文件系统进行全局逻辑审查，排查跨文件的 Bug、潜在死锁、未捕获异常、以及架构冲突。
+          promptText = `你是一个卓越的白盒安全专家、Bug 猎手和高并发调试大师。请对当前沙箱项目的多文件系统进行全局严格审查，重点排查跨文件交互中的逻辑漏洞、未捕获异常、内存泄漏、并发冲突以及边缘崩溃隐患。
 
-当前项目包含以下核心文件：
+📂 【工作区全景目录拓扑】
+\`\`\`text
+workspace/
+${workspaceTree}
+\`\`\`
+
+当前已加载分析的核心文件上下文：
 ${targetFiles.map(f => `- ${f.path}`).join("\n")}
 
 各文件具体源码内容如下：
 ${fileSummaries}
 
-请提供：
-1. **全局漏洞与 Bug 报告**: 分析存在的潜在运行崩溃点、时序冲突、状态不一致或隐藏的安全隐患。
-2. **多文件协同修复策略**: 说明如何多端/多文件对齐协同解决该 Bug。
-3. **关键修复建议**: 提出具体、可落地的解决思路。`;
+请提供一份精准、严谨的漏洞缺陷扫描与免疫加固报告：
+
+### 1. 🚨 跨文件安全与缺陷隐患矩阵 (Defect Matrix)
+请设计一个 Markdown 表格，分级分类罗列所有潜在缺陷：
+| 缺陷ID | 缺陷类别 (Concurrency/Sync/Exception/Security/Logic) | 严重级别 (Critical/High/Medium/Low) | 影响文件及代码位置 | 触发条件与边界条件 | 造成后果与失效模式 |
+
+### 2. 🩺 关键漏洞根因诊断 (Root Cause Diagnosis)
+- 深入剖析矩阵中 Medium 级及以上的缺陷，说明其底层执行流、事件循环或数据状态由于何种不合理设计而发生冲突或崩溃。
+
+### 3. 💉 免疫防御编程与安全加固 (Hardened Code Implementation)
+- 针对高危缺陷，提供防范彻底、逻辑自愈的**加固后完整代码块**。
+- 加固代码须遵循防御性编程最佳实践（包含异常分支捕获、超时重试、自动资源回收、熔断限流等机制），确保 100% 具备边缘用例自适应力。`;
         } else if (action === "data-summary") {
-          promptText = `你是一个资深的数据分析专家。请对当前沙箱项目中多个文件的数据流、运行日志或数据输出内容进行深度多文件联合提炼和数据洞察：
+          promptText = `你是一个顶级数据架构师和资深商业智能（BI）分析师。请对当前沙箱项目中多个文件的数据流、协议接口、持久化记录或输出内容进行**深度多文件联合提炼与数据血缘洞察**。
 
-当前项目包含以下核心文件：
+📂 【工作区全景目录拓扑】
+\`\`\`text
+workspace/
+${workspaceTree}
+\`\`\`
+
+当前已加载分析的核心文件上下文：
 ${targetFiles.map(f => `- ${f.path}`).join("\n")}
 
 各文件具体源码内容如下：
 ${fileSummaries}
 
-请提取并概括：
-1. **全局核心数据/指标摘要**: 跨文件的关键运行结果、指标、状态等。
-2. **多源数据模式与趋势**: 发现不同文件产出数据之间的相互联系、隐藏规律或异常波动。
-3. **多端协同业务建议**: 基于分析数据得出的多端落地与改进策略。`;
-        } else if (action === "custom") {
-          promptText = `你是一个强大的 AI 编程与工作区协同助手。请针对当前沙箱项目中的多个文件，回答用户的具体指令或提问。
+请提炼并输出一份精细化、可直接支持数据治理的数据流契约与洞察报告：
 
-当前项目包含以下核心文件：
+### 1. 📡 全局数据模型与接口契约总览 (Unified Schema & Protocol Spec)
+- 以 Markdown 表格形式统一整理本项目中所有跨文件传递、存储、或交互的数据契约，包含：【所属模块】、【字段/参数名】、【参数类型】、【约束条件/可空性】、【默认值】和【核心业务含义】。
+
+### 2. 📊 跨源数据血缘图 (Data Lineage & Trace Map)
+- 绘制一个直观的 **Mermaid 流程图** (\`graph LR\` 或 \`flowchart LR\`)，精准追踪数据在项目各流转节点的血缘演变过程（例如：外部入参 -> 数据验证器 -> 模型处理 -> 临时状态缓存 -> 最终持久化文件）。
+
+### 3. 💡 数据健康度诊断与演进建议 (Data Health & Evolution Guide)
+- 对项目现有的数据格式规范、存储冗余度、读写健壮性进行健康评分。
+- 给出支持大规模扩展、跨文件秒级对齐或多源异构整合的数据模型优化架构建议。`;
+        } else if (action === "custom") {
+          promptText = `你是一个具有深厚软件工程积淀的 AI 编程助手与工作区协同专家。请针对当前沙箱项目中的多个文件，深度解答用户的具体指令或提问。
+
+📂 【工作区全景目录拓扑】
+\`\`\`text
+workspace/
+${workspaceTree}
+\`\`\`
+
+当前已加载分析的核心文件上下文：
 ${targetFiles.map(f => `- ${f.path}`).join("\n")}
 
 各文件具体源码内容如下：
@@ -1140,7 +1367,7 @@ ${fileSummaries}
 
 用户提问/指令: "${customPrompt}"
 
-请结合上述所有文件内容，进行多文件全局视角的精准解答。如果是代码相关的修改，请提供修改后的核心文件完整代码块，方便用户一键替换。`;
+请结合上述所有上下文，以资深工程师的视角进行极其精准、切中肯綮的解答。若涉及代码修改，请务必提供修改后的、无损、完整的核心文件代码块，方便用户一键替换。`;
         } else {
           return res.status(400).json({ error: "Invalid action" });
         }
@@ -1149,7 +1376,7 @@ ${fileSummaries}
         const fileContent = targetFiles[0].content;
 
         if (action === "explain") {
-          promptText = `你是一个资深的软件工程专家，请对以下文件进行深度解读和技术解析。
+          promptText = `你是一个资深的软件工程专家，请对以下文件进行深度解读和多维度技术解析。
 
 文件路径: ${filePath}
 文件内容:
@@ -1158,12 +1385,12 @@ ${fileContent}
 \`\`\`
 
 请详细说明：
-1. 该文件的主要功能、职责与应用场景。
-2. 核心逻辑、算法或架构设计。
-3. 给开发者的阅读与后续二次开发建议。
-请使用结构清晰、排版美观的 Markdown 格式输出（支持中英文双语对照或全中文解析）。`;
+1. **主要功能与应用场景**：该文件的主要职责、应用定位以及与其它的模块协作关系。
+2. **核心业务逻辑与数据流向**：梳理关键方法/类/函数的调用链路，解析数据在其中如何变化与演变。
+3. **架构与设计模式亮点**：指出其中用到的优雅设计模式、优秀的并发或容错机制。
+4. **后续维护与二次开发建议**：提供未来扩展的切入点和注意事项。`;
         } else if (action === "optimize") {
-          promptText = `你是一个追求极致性能和代码规范的重构大师。请对以下文件进行审查并提出高级重构/优化意见：
+          promptText = `你是一个追求极致性能和代码健壮性的代码重构大师。请对以下文件进行深度逻辑审查，并提出高级重构/优化意见。
 
 文件路径: ${filePath}
 文件内容:
@@ -1172,10 +1399,10 @@ ${fileContent}
 \`\`\`
 
 请提供：
-1. **重构亮点**: 识别逻辑冗余、性能瓶颈、或是缺乏健壮性的部分，并解释为什么需要优化。
-2. **优化后的代码**: 在下方提供一份**完整**、**高可读性**、符合最佳实践的重构后代码。请确保将代码包裹在精确的代码块中（例如：\`\`\`python ... \`\`\` 或 \`\`\`javascript ... \`\`\`），以便执行引擎能够准确识别，并在后续中提供一键应用能力。`;
+1. **重构亮点与原理解释**：精确定位存在的逻辑冗余、性能瓶颈（如高频I/O、多余轮询）、代码可读性差等问题，并详尽剖析需要优化的底层理由。
+2. **重构调优后的完整代码**：在下方提供一份**完整**、**高可读性**、支持防御性异常捕获和并发安全的可替换代码。请务必将代码完整包裹在对应的代码块中，不要提供碎片化或带有省略号的截断片段，确保用户可无缝一键载入和保存。`;
         } else if (action === "fix-bugs") {
-          promptText = `你是一个资深的白盒安全专家和 Debug 工具。请对以下代码进行深度逻辑审查，排查潜在的 Bug、语法错误、不合规的逻辑结构。
+          promptText = `你是一个资深的白盒安全专家和卓越的 Bug 诊断工具。请对以下代码进行深度逻辑审查，严密排查潜在的运行崩溃点、异常捕获缺失、内存泄露或并发死锁。
 
 文件路径: ${filePath}
 文件内容:
@@ -1184,11 +1411,11 @@ ${fileContent}
 \`\`\`
 
 请提供：
-1. **缺陷分析**: 列出检测到的潜在风险、运行崩溃隐患或逻辑漏洞。
-2. **安全自愈方案**: 提出针对性的修复策略。
-3. **修复后的完整代码**: 在下方提供一份**完整**、**修正后**的代码，包裹在对应的代码块中，方便用户一键应用。`;
+1. **多维度缺陷分析表格**：列出检测到的每个潜在漏洞、边界溢出或崩溃点，包含【缺陷定位】、【触发边界/机制】、【缺陷影响】及【失效级别】。
+2. **安全自愈设计方案**：提出从根本上规避该逻辑缺陷的免疫方案。
+3. **安全加固后的完整代码**：提供一份**逻辑自愈**、**100%健壮且完美修复缺陷**的完整代码，完整包裹在对应的代码块中，方便用户一键完美替换。`;
         } else if (action === "data-summary") {
-          promptText = `你是一个资深的数据分析专家。请对以下文件的数据流、运行日志或数据输出内容进行深度提炼和数据洞察：
+          promptText = `你是一个资深的数据建模专家和高级数据分析师。请对以下文件的数据模式、运行指标、日志输出或状态契约进行深度提炼：
 
 文件路径: ${filePath}
 文件内容:
@@ -1196,22 +1423,22 @@ ${fileContent}
 ${fileContent}
 \`\`\`
 
-请提取并概括：
-1. **核心数据摘要**: 主要的关键指标、运行结果或重要数据点。
-2. **模式与趋势**: 发现数据中的隐藏规律、趋势或异常波动。
-3. **下一步行动建议**: 基于分析数据得出的具体、可落地业务策略建议。`;
+请详细归纳并提供：
+1. **核心数据字段与指标定义**：全面提取该文件中的关键常量、状态变量、或输出报表，列明其代表的物理/业务定义。
+2. **隐藏数据模式与行为特征**：解析变量之间的耦合度、状态转换轨迹或数值变化趋势。
+3. **健康度分析与下一步落地建议**：基于对代码中数据结构的审查，给出未来优化数据存储和接口设计的落地指引。`;
         } else if (action === "custom") {
-          promptText = `你是一个强大的 AI 编程与工作区协同助手。请针对以下文件回答用户的具体指令或提问。
+          promptText = `你是一个资深的 AI 编程顾问。请针对以下文件回答用户的具体指令或提问。
 
 文件路径: ${filePath}
+文件内容:
+\`\`\`
+${fileContent}
+\`\`\`
+
 用户提问/指令: "${customPrompt}"
 
-文件内容:
-\`\`\`
-${fileContent}
-\`\`\`
-
-请结合文件内容进行精准解答，如果是代码相关的修改，请提供修改后的完整代码块，以便用户能够一键替换。`;
+请切中要害、给出最符合工业规范的精确解答。如果是代码相关的修改，请务必提供修改后的核心文件完整代码块，以便用户能够无痛一键替换。`;
         } else {
           return res.status(400).json({ error: "Invalid action" });
         }
@@ -1347,87 +1574,154 @@ ${fileContent}
 
   app.post("/api/workspace/clean-cache", (req, res) => {
     try {
-      const tasks = getActiveTasks();
-      const activeFiles = new Set<string>();
-      tasks.forEach(task => {
-        const status = task.executionStatus || task.status;
-        if (status === "pending" || status === "running" || status === "suspended") {
-          if (task.results?.outputFiles) {
-            task.results.outputFiles.forEach((file: string) => {
-              if (file) activeFiles.add(file.trim().replace(/\\/g, "/"));
-            });
-          }
-        }
-      });
+      const testZoneDir = path.join(WORKSPACE_DIR, "test_zone");
+      if (!fs.existsSync(testZoneDir)) {
+        fs.mkdirSync(testZoneDir, { recursive: true });
+        return res.json({
+          success: true,
+          message: "测试区未创建或为空，无需清理",
+          deletedCount: 0,
+          releasedBytes: 0,
+          deletedFiles: []
+        });
+      }
 
-      const expiredFiles = new Set<string>();
-      const expiredTasks = tasks.filter(task => {
-        const status = task.executionStatus || task.status;
-        return status === "completed" || status === "failed";
-      });
-
-      expiredTasks.forEach(task => {
-        if (task.results?.outputFiles) {
-          task.results.outputFiles.forEach((file: string) => {
-            if (file) expiredFiles.add(file.trim().replace(/\\/g, "/"));
-          });
-        }
-      });
-
-      const filesToDelete: string[] = [];
-      expiredFiles.forEach(file => {
-        if (!activeFiles.has(file)) {
-          filesToDelete.push(file);
-        }
-      });
-
+      ensureTrashDirs();
+      const trashItems = loadTrashMetadata();
       let deletedCount = 0;
       let releasedBytes = 0;
       const deletedFiles: string[] = [];
 
-      filesToDelete.forEach(relPath => {
+      // Read files/folders in test_zone
+      const files = fs.readdirSync(testZoneDir);
+      for (const file of files) {
+        const fullPath = path.join(testZoneDir, file);
+        const relPath = `test_zone/${file}`;
         try {
-          const fullPath = safePath(relPath);
-          if (fs.existsSync(fullPath)) {
-            const stat = fs.statSync(fullPath);
-            if (stat.isFile()) {
-              releasedBytes += stat.size;
-              fs.unlinkSync(fullPath);
-              deletedCount++;
-              deletedFiles.push(relPath);
-            } else if (stat.isDirectory()) {
-              fs.rmSync(fullPath, { recursive: true, force: true });
-              deletedCount++;
-              deletedFiles.push(relPath);
-            }
-          }
-        } catch (err) {
-          console.error(`Error deleting cache file ${relPath}:`, err);
-        }
-      });
+          const stat = fs.statSync(fullPath);
+          const timestamp = Date.now() + Math.floor(Math.random() * 1000);
+          const trashId = `${timestamp}_${file}`;
+          const destPath = path.join(TRASH_FILES_DIR, trashId);
 
-      const cleanEmptyDirs = (dir: string) => {
-        if (!fs.existsSync(dir)) return;
-        const files = fs.readdirSync(dir);
-        files.forEach(file => {
-          const fullPath = path.join(dir, file);
-          if (fs.existsSync(fullPath) && fs.statSync(fullPath).isDirectory()) {
-            cleanEmptyDirs(fullPath);
-            if (fs.existsSync(fullPath) && fs.readdirSync(fullPath).length === 0) {
-              fs.rmdirSync(fullPath);
-            }
-          }
-        });
-      };
-      cleanEmptyDirs(WORKSPACE_DIR);
+          releasedBytes += stat.isDirectory() ? 4096 : stat.size;
+          fs.renameSync(fullPath, destPath);
+
+          trashItems.push({
+            id: trashId,
+            name: file,
+            originalPath: relPath,
+            deletedAt: new Date().toISOString(),
+            size: stat.isDirectory() ? 4096 : stat.size,
+            isDirectory: stat.isDirectory()
+          });
+          deletedCount++;
+          deletedFiles.push(relPath);
+        } catch (err: any) {
+          console.error(`Error trash-cleaning test_zone file ${file}:`, err);
+        }
+      }
+
+      saveTrashMetadata(trashItems);
 
       res.json({
         success: true,
-        message: `成功清理了 ${deletedCount} 个过期任务关联的文件`,
+        message: `成功安全清理并回收了测试区内的 ${deletedCount} 个测试文件/文件夹`,
         deletedCount,
         releasedBytes,
         deletedFiles
       });
+    } catch (error: any) {
+      console.error("Clean cache error:", error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Recycle Bin (Trash) management endpoints
+  app.get("/api/workspace/trash", (req, res) => {
+    try {
+      autoPurgeTrash(); // Automatically clear expired files (older than 7 days)
+      const items = loadTrashMetadata();
+      res.json(items);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/workspace/trash/restore", (req, res) => {
+    const { id } = req.body;
+    if (!id) return res.status(400).json({ error: "Missing trash item ID" });
+    try {
+      const items = loadTrashMetadata();
+      const itemIndex = items.findIndex(item => item.id === id);
+      if (itemIndex === -1) {
+        return res.status(404).json({ error: "未在回收站中找到该文件记录" });
+      }
+
+      const item = items[itemIndex];
+      const srcPath = path.join(TRASH_FILES_DIR, item.id);
+      if (!fs.existsSync(srcPath)) {
+        items.splice(itemIndex, 1);
+        saveTrashMetadata(items);
+        return res.status(404).json({ error: "回收站中的物理文件已丢失" });
+      }
+
+      const destPath = safePath(item.originalPath);
+      const destDir = path.dirname(destPath);
+      
+      // Ensure original parent directories exist
+      if (!fs.existsSync(destDir)) {
+        fs.mkdirSync(destDir, { recursive: true });
+      }
+
+      // Restore physically
+      fs.renameSync(srcPath, destPath);
+
+      // Remove record
+      items.splice(itemIndex, 1);
+      saveTrashMetadata(items);
+
+      res.json({ success: true, message: "文件已成功还原至原位置", originalPath: item.originalPath });
+    } catch (error: any) {
+      console.error("Restore failed:", error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/workspace/trash/delete", (req, res) => {
+    const { id } = req.body;
+    if (!id) return res.status(400).json({ error: "Missing trash item ID" });
+    try {
+      const items = loadTrashMetadata();
+      const itemIndex = items.findIndex(item => item.id === id);
+      if (itemIndex === -1) {
+        return res.status(404).json({ error: "未找到该回收站记录" });
+      }
+
+      const item = items[itemIndex];
+      const srcPath = path.join(TRASH_FILES_DIR, item.id);
+      if (fs.existsSync(srcPath)) {
+        fs.rmSync(srcPath, { recursive: true, force: true });
+      }
+
+      items.splice(itemIndex, 1);
+      saveTrashMetadata(items);
+
+      res.json({ success: true, message: "该文件已被永久彻底删除" });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/workspace/trash/empty", (req, res) => {
+    try {
+      ensureTrashDirs();
+      const files = fs.readdirSync(TRASH_FILES_DIR);
+      for (const file of files) {
+        const fullPath = path.join(TRASH_FILES_DIR, file);
+        fs.rmSync(fullPath, { recursive: true, force: true });
+      }
+      saveTrashMetadata([]);
+      res.json({ success: true, message: "回收站已安全彻底清空" });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
