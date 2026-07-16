@@ -1099,7 +1099,7 @@ export default function AIConfigManager({ onConfigChanged }: AIConfigManagerProp
       </div>
 
       {/* Main Form Fields */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-4">
+      <div className="flex-1 overflow-y-auto custom-scrollbar p-4 space-y-4">
         {/* active status indicator banner */}
         <div className="p-3 border border-blue-500/20 rounded bg-blue-950/10 flex items-center justify-between">
           <div className="space-y-1">

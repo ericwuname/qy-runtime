@@ -1,11 +1,11 @@
 import { GoogleGenAI } from "@google/genai";
 import { toolsList } from "./tools";
 
-export function getBackupProvider(currentProvider: string, currentConfig: any): { name: string; model: string } | null {
-  if (!currentConfig || !currentConfig.providers) return null;
+export function getBackupProviders(currentProvider: string, currentConfig: any): Array<{ name: string; model: string }> {
+  if (!currentConfig || !currentConfig.providers) return [];
   
   // Try with non-empty API keys first
-  let candidates = Object.entries(currentConfig.providers)
+  const candidates = Object.entries(currentConfig.providers)
     .filter(([name, p]: [string, any]) => {
       if (name.toLowerCase() === currentProvider.toLowerCase()) return false;
       const apiKey = p?.apiKey;
@@ -17,18 +17,23 @@ export function getBackupProvider(currentProvider: string, currentConfig: any): 
     }))
     .filter(c => c.model !== "");
 
-  if (candidates.length === 0) {
-    // Fallback: try any provider with a default model that is not the current one
-    candidates = Object.entries(currentConfig.providers)
-      .filter(([name, p]: [string, any]) => name.toLowerCase() !== currentProvider.toLowerCase())
-      .map(([name, p]: [string, any]) => ({
-        name,
-        model: p.defaultModel || (p.availableModels && p.availableModels[0]) || ""
-      }))
-      .filter(c => c.model !== "");
-  }
+  const others = Object.entries(currentConfig.providers)
+    .filter(([name, p]: [string, any]) => {
+      if (name.toLowerCase() === currentProvider.toLowerCase()) return false;
+      return !candidates.some(c => c.name.toLowerCase() === name.toLowerCase());
+    })
+    .map(([name, p]: [string, any]) => ({
+      name,
+      model: p.defaultModel || (p.availableModels && p.availableModels[0]) || ""
+    }))
+    .filter(c => c.model !== "");
 
-  return candidates.length > 0 ? candidates[0] : null;
+  return [...candidates, ...others];
+}
+
+export function getBackupProvider(currentProvider: string, currentConfig: any): { name: string; model: string } | null {
+  const backups = getBackupProviders(currentProvider, currentConfig);
+  return backups.length > 0 ? backups[0] : null;
 }
 
 // Multi-Provider execution dispatcher with tool use mappings
@@ -61,26 +66,62 @@ export async function callAIProvider(
           }
         }
       });
-      const response = await ai.models.generateContent({
-        model: modelName,
-        contents: history,
-        config: {
-          systemInstruction,
-          tools: [{ functionDeclarations: toolsList }],
-          temperature,
-          maxOutputTokens: provider.parameters?.maxOutputTokens || 4096
+
+      let lastGeminiErr: any = null;
+      const availableModels = provider.availableModels || [];
+      const geminiModelsToTry = [
+        modelName,
+        ...availableModels.filter((m: string) => m !== modelName),
+        "gemini-3.5-flash",
+        "gemini-2.5-flash",
+        "gemini-1.5-flash",
+        "gemini-3.1-pro-preview"
+      ];
+      
+      const uniqueModels = Array.from(new Set(geminiModelsToTry));
+      
+      for (const currentTryModel of uniqueModels) {
+        try {
+          const response = await ai.models.generateContent({
+            model: currentTryModel,
+            contents: history,
+            config: {
+              systemInstruction,
+              tools: [{ functionDeclarations: toolsList }],
+              temperature,
+              maxOutputTokens: provider.parameters?.maxOutputTokens || 4096
+            }
+          });
+          const tokensUsed = response.usageMetadata?.totalTokenCount || 0;
+          return {
+            text: response.text || "",
+            functionCalls: response.functionCalls?.map((c: any) => ({
+              name: c.name,
+              args: c.args,
+              id: c.id || `call_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`
+            })),
+            tokensUsed
+          };
+        } catch (geminiErr: any) {
+          lastGeminiErr = geminiErr;
+          const errMsg = geminiErr.message || String(geminiErr);
+          const isOverloadedOrRateLimited = 
+            /503/i.test(errMsg) || 
+            /demand/i.test(errMsg) || 
+            /overload/i.test(errMsg) || 
+            /limit/i.test(errMsg) || 
+            /429/i.test(errMsg) ||
+            /resource/i.test(errMsg) ||
+            /unavailable/i.test(errMsg);
+            
+          if (!isOverloadedOrRateLimited) {
+            // Structural errors should propagate up
+            throw geminiErr;
+          }
+          console.warn(`Gemini model ${currentTryModel} failed with overload/rate-limit. Trying alternative model... Error details: ${errMsg}`);
         }
-      });
-      const tokensUsed = response.usageMetadata?.totalTokenCount || 0;
-      return {
-        text: response.text || "",
-        functionCalls: response.functionCalls?.map((c: any) => ({
-          name: c.name,
-          args: c.args,
-          id: c.id || `call_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`
-        })),
-        tokensUsed
-      };
+      }
+      throw lastGeminiErr;
     }
     
     case "openai":

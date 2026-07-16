@@ -180,9 +180,38 @@ export default function WorkspaceManager() {
     return results;
   };
 
+  // Workbench layout states
+  const [rightTab, setRightTab] = useState<"preview" | "code" | "index">("preview");
+  const [indexerQuery, setIndexerQuery] = useState("");
+  const [indexerSymbols, setIndexerSymbols] = useState<any[]>([]);
+  const [indexerLoading, setIndexerLoading] = useState(false);
+
+  const fetchIndexerSymbols = async (q = "") => {
+    setIndexerLoading(true);
+    try {
+      const res = await fetch(`/api/indexer/symbols?q=${encodeURIComponent(q)}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success && data.symbols) {
+          setIndexerSymbols(data.symbols);
+        }
+      }
+    } catch (err) {
+      console.error("Error fetching indexer symbols:", err);
+    } finally {
+      setIndexerLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (rightTab === "index") {
+      fetchIndexerSymbols(indexerQuery);
+    }
+  }, [rightTab, indexerQuery]);
+
   // Copilot Panel states
   const [showAiPanel, setShowAiPanel] = useState(true);
-  const [activeTab, setActiveTab] = useState<"ai" | "template">("ai");
+  const [activeTab, setActiveTab] = useState<"ai">("ai");
   const [aiResponse, setAiResponse] = useState<string>("");
   const [aiLoading, setAiLoading] = useState(false);
   const [customPrompt, setCustomPrompt] = useState("");
@@ -197,7 +226,18 @@ export default function WorkspaceManager() {
   
   const chatBottomRef = useRef<HTMLDivElement>(null);
 
-  // Auto-scroll to the bottom of the chat pane is disabled per user request to prevent unexpected jumps.
+  // Auto-scroll to bottom of chat is responsive
+  const scrollToBottom = () => {
+    if (chatBottomRef.current) {
+      chatBottomRef.current.scrollIntoView({ behavior: "smooth" });
+    }
+  };
+
+  useEffect(() => {
+    if (aiLoading) {
+      scrollToBottom();
+    }
+  }, [aiLoading]);
 
   const fetchSessions = async (selectLatest = false) => {
     try {
@@ -344,7 +384,7 @@ export default function WorkspaceManager() {
           }
         } catch (err) {
           console.error("Error cleaning cache:", err);
-          showAlert("连接失败", "清理请求失败，无法连接到执行端服务器。");
+          showAlert("连接失败", "清理请求失败，无法连接 to 执行端服务器。");
         } finally {
           setCleaning(false);
         }
@@ -880,1004 +920,866 @@ run();
   const isDirty = selectedFilePath && fileContent !== originalContent;
   const hasExtractedCode = extractCodeFromMarkdown(aiResponse) !== null;
 
+  const handleReindex = async () => {
+    setIndexerLoading(true);
+    try {
+      const res = await fetch("/api/indexer/reindex", { method: "POST" });
+      if (res.ok) {
+        fetchIndexerSymbols(indexerQuery);
+        fetchFiles();
+        showAlert("提示", "✨ 仓库索引重建成功！所有文件与代码符号已重新载入。");
+      }
+    } catch (e) {
+      console.error(e);
+      showAlert("错误", "仓库索引重建失败，请检查控制台。");
+    } finally {
+      setIndexerLoading(false);
+    }
+  };
+
+  const activeSession = sessions.find(s => s.id === currentSessionId);
+  const allExecutedActions = activeSession?.messages
+    ? activeSession.messages.flatMap((m: any) => m.executedActions || [])
+    : [];
+
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 h-full overflow-y-auto pr-1 pb-4 relative custom-scrollbar" id="sandbox-workspace-workbench">
+    <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 lg:h-full lg:overflow-hidden h-auto overflow-y-auto pr-1 pb-4 relative" id="sandbox-workspace-workbench">
       
-      {/* 1. FILE TREE DISCOVERY (Left Panel - Span 3) */}
-      <div className="lg:col-span-3 flex flex-col bg-[#0F172A] border border-[#1F2937] rounded overflow-hidden shadow-xl h-[650px]">
-        {/* Panel Header */}
-        <div className="p-3 border-b border-[#1F2937] bg-[#111827] flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Folder className="w-4 h-4 text-blue-400" />
-            <h2 className="font-mono text-[10px] uppercase font-bold tracking-widest text-slate-400">Sandbox Tree (文件发现)</h2>
-          </div>
-          <div className="flex items-center gap-1.5">
+      {/* LEFT PANEL: AI AGENT CHAT (Span 5) */}
+      <div className="lg:col-span-5 flex flex-col bg-[#0F172A] border border-[#1F2937] rounded-lg overflow-hidden shadow-xl h-full animate-in fade-in duration-200">
+        {/* Tabs header */}
+        <div className="border-b border-[#1F2937] bg-[#111827] flex p-1 justify-between items-center shrink-0">
+          <div className="flex gap-1">
             <button
-              onClick={handleCleanCache}
-              disabled={cleaning}
-              title="一键安全清理测试沙箱临时文件，并进入历史回收站"
-              className="px-2 py-0.5 hover:bg-rose-950/20 text-rose-400 hover:text-rose-300 disabled:opacity-50 disabled:cursor-not-allowed rounded transition-colors cursor-pointer flex items-center gap-1 text-[9px] uppercase font-mono font-bold border border-rose-500/10 hover:border-rose-500/30"
+              onClick={() => setActiveTab("ai")}
+              className={`px-3 py-1.5 rounded text-[10px] font-mono font-bold uppercase flex items-center gap-1.5 transition-all cursor-pointer ${
+                activeTab === "ai"
+                  ? "bg-[#020617] text-blue-400 border border-[#1F2937]"
+                  : "text-slate-500 hover:text-slate-300"
+              }`}
             >
-              <Trash2 className={`w-3 h-3 text-rose-400 ${cleaning ? "animate-pulse" : ""}`} />
-              <span>{cleaning ? "Cleaning..." : "Clean"}</span>
+              <Sparkles className="w-3.5 h-3.5 text-blue-400" />
+              <span>AI Copilot Agent</span>
             </button>
-            <span className="text-slate-800 text-xs">|</span>
             <button
-              onClick={fetchFiles}
-              title="强制同步工作区"
-              className="p-1 hover:bg-slate-800 text-slate-400 hover:text-slate-200 rounded transition-colors cursor-pointer"
+              onClick={() => setShowSessionsSidebar(prev => !prev)}
+              className={`px-3 py-1.5 rounded text-[10px] font-mono font-bold uppercase flex items-center gap-1.5 transition-all cursor-pointer ${
+                showSessionsSidebar
+                  ? "bg-[#020617] text-amber-400 border border-[#1F2937]"
+                  : "text-slate-500 hover:text-slate-300"
+              }`}
+              title="查看/管理历史对话"
             >
-              <RefreshCw className={`w-3 h-3 ${loading ? "animate-spin" : ""}`} />
+              <History className="w-3.5 h-3.5 text-amber-400" />
+              <span>历史记录</span>
             </button>
           </div>
         </div>
 
-        {/* Navigation Tabs */}
-        <div className="flex border-b border-[#1F2937] bg-[#020617]/50 p-1 gap-1">
-          <button
-            onClick={() => setTreeViewMode("core")}
-            className={`flex-1 py-1 px-1 rounded text-[10px] font-mono font-bold uppercase transition-all cursor-pointer flex items-center justify-center gap-1 ${
-              treeViewMode === "core"
-                ? "bg-[#1E293B] text-blue-400 border border-[#334155]"
-                : "text-slate-500 hover:text-slate-300 border border-transparent"
-            }`}
-            title="查看和编辑项目的核心开发逻辑与代码"
-          >
-            <Code2 className="w-3 h-3" />
-            <span>核心逻辑</span>
-          </button>
-          <button
-            onClick={() => setTreeViewMode("test")}
-            className={`flex-1 py-1 px-1 rounded text-[10px] font-mono font-bold uppercase transition-all cursor-pointer flex items-center justify-center gap-1 ${
-              treeViewMode === "test"
-                ? "bg-amber-950/40 text-amber-400 border border-amber-500/20"
-                : "text-slate-500 hover:text-slate-300 border border-transparent"
-            }`}
-            title="测试临时文件专用存储区域"
-          >
-            <Sparkles className="w-3 h-3" />
-            <span>测试沙箱</span>
-          </button>
-          <button
-            onClick={() => setTreeViewMode("trash")}
-            className={`flex-1 py-1 px-1 rounded text-[10px] font-mono font-bold uppercase transition-all cursor-pointer flex items-center justify-center gap-1 ${
-              treeViewMode === "trash"
-                ? "bg-rose-950/30 text-rose-400 border border-rose-500/15"
-                : "text-slate-500 hover:text-slate-300 border border-transparent"
-            }`}
-            title="查看回收站文件并支持安全还原"
-          >
-            <History className="w-3 h-3" />
-            <span>回收站</span>
-            {trashItems.length > 0 && (
-              <span className="bg-rose-500 text-white rounded-full text-[8px] px-1 shrink-0">
-                {trashItems.length}
-              </span>
-            )}
-          </button>
-        </div>
-
-        {/* Search & Toolbars */}
-        <div className="p-2 border-b border-[#1F2937] bg-[#0A0B0E]/20 space-y-2">
-          {/* Search bar */}
-          <div className="relative">
-            <Search className="absolute left-2.5 top-2 w-3.5 h-3.5 text-slate-500" />
-            <input
-              type="text"
-              placeholder={treeViewMode === "trash" ? "搜索暂存垃圾..." : "搜索工作区文件..."}
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full pl-8 pr-3 py-1 bg-[#020617] border border-[#1F2937]/80 rounded text-slate-300 text-xs focus:outline-none focus:border-blue-500/50 placeholder-slate-700 font-mono"
-            />
-          </div>
-
-          {/* Multi-file batch controls - only relevant for files, not trash */}
-          {treeViewMode !== "trash" && (
-            <div className="flex items-center justify-between text-[9px] text-slate-500 font-mono pt-0.5 pb-1 px-1">
-              <span className="text-[8px] uppercase font-bold text-slate-600 tracking-wider">Project Scope:</span>
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => {
-                    const allPaths: string[] = [];
-                    const collect = (nodes: FileNode[]) => {
-                      for (const n of nodes) {
-                        if (!n.isDirectory) allPaths.push(n.path);
-                        if (n.children) collect(n.children);
-                      }
-                    };
-                    collect(displayNodes);
-                    setSelectedProjectFiles(allPaths);
-                  }}
-                  className="hover:text-blue-400 font-bold transition-colors cursor-pointer"
-                  title="一键选择该视图下所有脚本和配置文件进行深度交叉分析"
-                >
-                  全选 ({displayNodes.reduce((acc, n) => acc + getAllFilePathsUnderNode(n).length, 0)}个)
-                </button>
-                <span className="text-slate-800">|</span>
-                <button
-                  type="button"
-                  onClick={() => setSelectedProjectFiles([])}
-                  className="hover:text-rose-400 font-bold transition-colors cursor-pointer"
-                  title="清空当前勾选的文件范围"
-                >
-                  清空
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* Create Buttons */}
-          {treeViewMode !== "trash" && (
-            <div className="flex gap-1.5">
-              <button
-                onClick={() => setNewItemType("file")}
-                className="flex-1 py-1 px-1.5 bg-slate-800 hover:bg-slate-700 text-[10px] font-mono font-bold uppercase text-slate-300 rounded flex items-center justify-center gap-1 cursor-pointer transition-colors"
-              >
-                <FilePlus className="w-3 h-3" />
-                + File
-              </button>
-              <button
-                onClick={() => setNewItemType("folder")}
-                className="flex-1 py-1 px-1.5 bg-slate-800 hover:bg-slate-700 text-[10px] font-mono font-bold uppercase text-slate-300 rounded flex items-center justify-center gap-1 cursor-pointer transition-colors"
-              >
-                <FolderPlus className="w-3 h-3" />
-                + Folder
-              </button>
-            </div>
-          )}
-        </div>
-
-        {/* Clean Cache Notification Banner */}
-        {cleanStats && (
-          <div className="p-2 border-b border-[#1F2937] bg-emerald-950/20 text-emerald-400 text-[10px] font-mono leading-normal animate-in fade-in slide-in-from-top-1 flex items-start justify-between">
-            <span className="flex items-center gap-1">
-              <span>✨</span>
-              <span>
-                安全清理：回收了测试区域内 <strong>{cleanStats.deletedCount}</strong> 个测试文件并移入回收站
-              </span>
-            </span>
-            <button onClick={() => setCleanStats(null)} className="p-0.5 hover:bg-emerald-900/30 rounded text-emerald-500">
-              <X className="w-3 h-3" />
-            </button>
-          </div>
-        )}
-
-        {/* Node Creator Form overlay inline */}
-        {newItemType && (
-          <form onSubmit={handleCreateItem} className="p-2 border-b border-[#1F2937] bg-blue-950/20 flex gap-1.5 animate-in slide-in-from-top-2 duration-150">
-            <input
-              type="text"
-              required
-              placeholder={newItemType === "file" ? "e.g. run.py" : "e.g. dataset"}
-              value={newItemName}
-              onChange={(e) => setNewItemName(e.target.value)}
-              className="flex-1 px-2 py-0.5 bg-[#020617] border border-[#1F2937] rounded text-slate-200 text-xs focus:outline-none focus:border-blue-500"
-            />
-            <button
-              type="submit"
-              className="px-2 py-0.5 bg-blue-600 hover:bg-blue-500 text-white rounded text-[10px] font-mono font-bold uppercase cursor-pointer"
-            >
-              Create
-            </button>
-            <button
-              type="button"
-              onClick={() => setNewItemType(null)}
-              className="p-1 text-slate-400 hover:text-slate-200"
-            >
-              <X className="w-3 h-3" />
-            </button>
-          </form>
-        )}
-
-        {/* Recursive Tree Body / Trash List */}
-        <div className="flex-1 overflow-y-auto p-3 bg-[#0A0F1D]/30 custom-scrollbar">
-          {treeViewMode === "trash" ? (
-            trashLoading ? (
-              <div className="text-center py-12 text-xs text-slate-600 animate-pulse font-mono">
-                [SYSTEM_SYNC] 读取回收站历史...
-              </div>
-            ) : trashItems.length === 0 ? (
-              <div className="text-center py-12 px-4 text-xs text-slate-600 font-mono flex flex-col items-center gap-2">
-                <Check className="w-5 h-5 text-emerald-500" />
-                <span>回收站为空，系统干干净净</span>
-                <span className="text-[9px] text-slate-700 leading-normal">清理的测试文件会存入此处，支持物理还原自愈</span>
-              </div>
-            ) : (
-              <div className="space-y-2">
-                <div className="flex items-center justify-between text-[10px] font-mono text-slate-500 pb-1.5 border-b border-[#1F2937]/60">
-                  <span>已暂存项目 ({trashItems.filter(item => item.name.toLowerCase().includes(searchQuery.toLowerCase())).length} 个)</span>
+        {/* TAB 1: AI ASSISTANT PORTAL */}
+        {activeTab === "ai" && (
+          <div className="flex-1 flex overflow-hidden relative">
+            {/* Sessions Sidebar */}
+            {showSessionsSidebar && (
+              <div className="w-[150px] shrink-0 border-r border-[#1F2937] bg-[#0A0B0E]/80 flex flex-col overflow-hidden animate-in slide-in-from-left duration-150">
+                <div className="p-2 border-b border-[#1F2937] flex items-center justify-between shrink-0 bg-[#111827]">
+                  <span className="text-[9px] font-mono font-bold text-slate-400 uppercase tracking-widest">对话历史</span>
                   <button
-                    onClick={handleEmptyTrash}
-                    className="text-rose-400 hover:text-rose-300 font-bold transition-colors cursor-pointer"
+                    onClick={() => handleCreateSession()}
+                    className="px-1.5 py-0.5 bg-blue-900/30 hover:bg-blue-900/60 text-blue-400 border border-blue-500/20 text-[9px] font-mono rounded font-bold cursor-pointer transition-colors"
+                    title="新建对话"
                   >
-                    一键清空
+                    + 新建
                   </button>
                 </div>
-                <div className="space-y-1.5 max-h-[480px] overflow-y-auto">
-                  {trashItems
-                    .filter(item => item.name.toLowerCase().includes(searchQuery.toLowerCase()))
-                    .map((item) => (
-                      <div
-                        key={item.id}
-                        className="group p-2 rounded bg-[#0A0B0E]/40 border border-[#1F2937]/45 hover:border-slate-800 transition-all text-xs"
-                      >
-                        <div className="flex items-start gap-1.5 justify-between">
-                          <div className="flex items-start gap-1.5 overflow-hidden w-full">
-                            {item.isDirectory ? (
-                              <Folder className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+                <div className="flex-1 overflow-y-auto custom-scrollbar p-1 space-y-1">
+                  {sessions.length === 0 ? (
+                    <div className="text-[10px] text-slate-600 text-center py-6 font-mono">暂无对话记录</div>
+                  ) : (
+                    sessions.map(s => {
+                      const isSelected = s.id === currentSessionId;
+                      const isEditing = s.id === editingSessionId;
+                      return (
+                        <div
+                          key={s.id}
+                          onClick={() => {
+                            setCurrentSessionId(s.id);
+                            const lastMsg = s.messages && s.messages.length > 0 ? s.messages[s.messages.length - 1] : null;
+                            setAiResponse(lastMsg && lastMsg.role === "model" ? lastMsg.parts[0].text : "");
+                            setAiError(null);
+                          }}
+                          className={`p-2 rounded text-[11px] group relative flex flex-col cursor-pointer transition-colors ${
+                            isSelected
+                              ? "bg-blue-950/40 border border-blue-500/20 text-blue-300"
+                              : "text-slate-400 hover:bg-slate-800/50 hover:text-slate-200"
+                          }`}
+                        >
+                          <div className="flex-1 min-w-0 pr-6">
+                            {isEditing ? (
+                              <input
+                                type="text"
+                                autoFocus
+                                value={editingSessionTitle}
+                                onChange={e => setEditingSessionTitle(e.target.value)}
+                                onBlur={() => handleRenameSession(s.id, editingSessionTitle)}
+                                onKeyDown={e => {
+                                  if (e.key === "Enter") handleRenameSession(s.id, editingSessionTitle);
+                                  if (e.key === "Escape") setEditingSessionId(null);
+                                }}
+                                className="w-full bg-slate-900 border border-blue-500 rounded px-1 text-[11px] text-slate-200 outline-none"
+                              />
                             ) : (
-                              <FileCode className="w-4 h-4 text-slate-400 shrink-0 mt-0.5" />
+                              <div className="truncate font-medium">{s.title || "新对话"}</div>
                             )}
-                            <div className="overflow-hidden w-full text-[11px]">
-                              <p className="font-mono text-slate-200 truncate font-semibold" title={item.name}>
-                                {item.name}
-                              </p>
-                              <p className="text-[9px] text-slate-500 truncate" title={`原路径: ${item.originalPath}`}>
-                                原: {item.originalPath}
-                              </p>
-                              <p className="text-[8px] text-slate-600 font-mono mt-0.5">
-                                {new Date(item.deletedAt).toLocaleString("zh-CN", { hour12: false })}
-                              </p>
+                            <div className="text-[8px] text-slate-600 font-mono mt-0.5">
+                              {new Date(s.updatedAt || s.createdAt).toLocaleDateString("zh-CN", {
+                                month: "numeric",
+                                day: "numeric",
+                                hour: "2-digit",
+                                minute: "2-digit"
+                              })}
                             </div>
                           </div>
                           
-                          <div className="flex gap-1 shrink-0">
-                            <button
-                              onClick={() => handleRestoreTrashItem(item.id)}
-                              className="p-1 hover:bg-emerald-950/30 text-emerald-500 hover:text-emerald-400 rounded transition-colors cursor-pointer"
-                              title="一键物理还原并自愈"
-                            >
-                              <RotateCcw className="w-3.5 h-3.5" />
-                            </button>
-                            <button
-                              onClick={() => handlePermanentDeleteTrashItem(item.id)}
-                              className="p-1 hover:bg-rose-950/30 text-rose-500 hover:text-rose-400 rounded transition-colors cursor-pointer"
-                              title="永久彻底删除"
-                            >
-                              <X className="w-3.5 h-3.5" />
-                            </button>
-                          </div>
+                          {!isEditing && (
+                            <div className="absolute right-1 top-2.5 opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1.5 pl-2">
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setEditingSessionId(s.id);
+                                  setEditingSessionTitle(s.title || "新对话");
+                                }}
+                                className="text-[10px] text-slate-500 hover:text-slate-300"
+                                title="重命名"
+                              >
+                                ✏️
+                              </button>
+                              <button
+                                onClick={(e) => handleDeleteSession(s.id, e)}
+                                className="text-slate-500 hover:text-rose-400"
+                                title="删除"
+                              >
+                                <Trash2 className="w-2.5 h-2.5" />
+                              </button>
+                            </div>
+                          )}
                         </div>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Chat Main Area */}
+            <div className="flex-1 flex flex-col overflow-hidden">
+              {/* Scope Toggler */}
+              <div className="p-2 border-b border-[#1F2937]/80 bg-[#111827]/60 flex items-center justify-between gap-2.5 shrink-0">
+                <span className="text-[10px] font-mono font-bold uppercase text-slate-400">分析范围 / SCOPE:</span>
+                <div className="flex bg-[#020617] p-0.5 rounded border border-[#1F2937] text-[10px] font-mono">
+                  <button
+                    type="button"
+                    onClick={() => setAiScope("single")}
+                    className={`px-2 py-1 rounded font-bold transition-all cursor-pointer ${
+                      aiScope === "single"
+                        ? "bg-blue-600 text-white font-extrabold"
+                        : "text-slate-500 hover:text-slate-300"
+                    }`}
+                  >
+                    单文件
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAiScope("project")}
+                    className={`px-2 py-1 rounded font-bold transition-all relative cursor-pointer ${
+                      aiScope === "project"
+                        ? "bg-blue-600 text-white font-extrabold"
+                        : "text-slate-500 hover:text-slate-300"
+                    }`}
+                  >
+                    项目级 ({selectedProjectFiles.length}个)
+                    {selectedProjectFiles.length > 0 && (
+                      <span className="absolute -top-1 -right-1 flex h-2 w-2">
+                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                        <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                      </span>
+                    )}
+                  </button>
+                </div>
+              </div>
+
+              {/* Active Model Pool HUD */}
+              <div className="px-3 py-1.5 border-b border-[#1F2937]/65 bg-[#080E1A] flex items-center justify-between gap-2 shrink-0 select-none">
+                <div className="flex items-center gap-1.5 overflow-hidden">
+                  <span className="relative flex h-2 w-2 shrink-0">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                    <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                  </span>
+                  <span className="text-[9px] font-mono font-bold text-slate-400 truncate uppercase tracking-wider">
+                    Codex AI Agent Engine Online
+                  </span>
+                </div>
+                <div className="flex items-center gap-1 shrink-0">
+                  <span className="px-1.5 py-0.5 bg-[#020617] text-[9px] font-mono text-blue-400 rounded border border-[#1F2937]">
+                    Gemini 3.5 Flash
+                  </span>
+                </div>
+              </div>
+
+              {/* Quick Prompt Command Matrix */}
+              {(aiScope === "project" || selectedFilePath) && (
+                <div className="p-3 bg-[#0A0F1D]/50 border-b border-[#1F2937] space-y-1.5 shrink-0 animate-in fade-in duration-200">
+                  <div className="flex justify-between items-center mb-1">
+                    <span className="text-[9px] font-mono font-bold text-slate-500 uppercase tracking-widest block">一键深度探针 / Core Agents</span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      onClick={() => handleCallAiCopilot("explain")}
+                      disabled={aiLoading}
+                      className="py-1.5 px-2 bg-slate-800/80 hover:bg-slate-700 border border-slate-700/50 rounded flex items-center justify-center gap-1.5 text-[10px] font-bold text-slate-300 cursor-pointer transition-colors"
+                    >
+                      <Settings className="w-3.5 h-3.5 text-blue-400" />
+                      <span>{aiScope === "project" ? "一键解构项目" : "解读文件逻辑"}</span>
+                    </button>
+                    <button
+                      onClick={() => handleCallAiCopilot("optimize")}
+                      disabled={aiLoading}
+                      className="py-1.5 px-2 bg-slate-800/80 hover:bg-slate-700 border border-slate-700/50 rounded flex items-center justify-center gap-1.5 text-[10px] font-bold text-slate-300 cursor-pointer transition-colors"
+                    >
+                      <Cpu className="w-3.5 h-3.5 text-emerald-400 animate-pulse" />
+                      <span>{aiScope === "project" ? "项目重构优化" : "重构优化"}</span>
+                    </button>
+                    <button
+                      onClick={() => handleCallAiCopilot("fix-bugs")}
+                      disabled={aiLoading}
+                      className="py-1.5 px-2 bg-slate-800/80 hover:bg-slate-700 border border-slate-700/50 rounded flex items-center justify-center gap-1.5 text-[10px] font-bold text-slate-300 cursor-pointer transition-colors"
+                    >
+                      <Activity className="w-3.5 h-3.5 text-rose-400" />
+                      <span>代码缺陷排查</span>
+                    </button>
+                    <button
+                      onClick={() => handleCallAiCopilot("data-summary")}
+                      disabled={aiLoading}
+                      className="py-1.5 px-2 bg-slate-800/80 hover:bg-slate-700 border border-slate-700/50 rounded flex items-center justify-center gap-1.5 text-[10px] font-bold text-slate-300 cursor-pointer transition-colors"
+                    >
+                      <FileText className="w-3.5 h-3.5 text-purple-400" />
+                      <span>数据提炼洞察</span>
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Stream output panel */}
+              <div className="flex-1 overflow-y-auto custom-scrollbar p-4 bg-[#030712] relative space-y-4 select-text">
+                {activeSession && activeSession.messages && activeSession.messages.length > 0 ? (
+                  activeSession.messages.map((msg: any, idx: number) => {
+                    const isUser = msg.role === "user";
+                    return (
+                      <div
+                        key={idx}
+                        className={`flex flex-col ${isUser ? "items-end" : "items-start"} animate-in fade-in slide-in-from-bottom-2 duration-150`}
+                      >
+                        <div className="flex items-center gap-1 text-[9px] text-slate-500 font-mono mb-1 px-1">
+                          <span>{isUser ? "You" : "Codex Copilot"}</span>
+                          <span>•</span>
+                          <span>
+                            {new Date(msg.timestamp).toLocaleTimeString("zh-CN", {
+                              hour: "2-digit",
+                              minute: "2-digit"
+                            })}
+                          </span>
+                        </div>
+                        <div
+                          className={`p-3 rounded-lg text-xs leading-relaxed max-w-[88%] select-text whitespace-normal break-words ${
+                            isUser
+                              ? "bg-blue-600/25 border border-blue-500/20 text-slate-200"
+                              : "bg-[#0A0F1D]/80 border border-[#1F2937] text-slate-300 markdown-body leading-relaxed space-y-2"
+                          }`}
+                        >
+                          {isUser ? (
+                            <p className="whitespace-pre-wrap font-mono">{msg.displayPrompt || msg.parts[0]?.text}</p>
+                          ) : (
+                            <Markdown>{msg.parts[0]?.text || ""}</Markdown>
+                          )}
+                        </div>
+
+                        {/* Collapsed actions inside chat can stay, but they are also shown in Right Panel Preview */}
+                        {!isUser && msg.executedActions && msg.executedActions.length > 0 && (
+                          <div className="mt-1 text-[9px] text-emerald-400/80 font-mono italic pl-2">
+                            ⚡ 已自动执行了 {msg.executedActions.length} 步操作，详情已实时推送至右侧【运行预览】
+                          </div>
+                        )}
                       </div>
-                    ))}
-                </div>
-              </div>
-            )
-          ) : loading && files.length === 0 ? (
-            <div className="text-center py-12 text-xs text-slate-600 animate-pulse font-mono">
-              [SYSTEM_SYNC] 同步工作区节点中...
-            </div>
-          ) : filteredFiles.length === 0 ? (
-            <div className="text-center py-12 text-xs text-slate-600 font-mono">
-              {treeViewMode === "test" ? (
-                <div className="flex flex-col items-center gap-1 px-4 leading-normal">
-                  <span className="text-slate-500">测试沙箱暂无文件</span>
-                  <span className="text-[9px] text-slate-700">可通过上方 "+ File" 在本区域创建实验脚本，安全清爽！</span>
-                </div>
-              ) : (
-                "工作区为空，可一键在模版页生成"
-              )}
-            </div>
-          ) : (
-            renderFileTree(filteredFiles)
-          )}
-        </div>
-      </div>
+                    )
+                  })
+                ) : (
+                  <div className="text-center py-24 text-slate-600 font-sans">
+                    <Sparkles className="w-8 h-8 text-slate-800 mx-auto mb-2 animate-pulse" />
+                    <p className="text-[10px] uppercase font-mono tracking-wider">AI Copilot Interactive Frame</p>
+                    <p className="text-[9px] text-slate-700 mt-1 max-w-[200px] mx-auto">在下方输入框中向 AI 提问或派发多步执行规划任务。</p>
+                  </div>
+                )}
 
-      {/* 2. CORE WORKSPACE EDITOR & PREVIEWER (Middle Panel - Span 5 or 9) */}
-      <div className={`${showAiPanel ? "lg:col-span-5" : "lg:col-span-9"} flex flex-col gap-4 h-[650px] transition-all duration-300`}>
-        <div className="flex-1 flex flex-col bg-[#0F172A] border border-[#1F2937] rounded overflow-hidden shadow-xl">
-          {/* Header toolbar */}
-          <div className="p-3 border-b border-[#1F2937] bg-[#111827] flex items-center justify-between">
-            <div className="flex items-center gap-2 overflow-hidden">
-              <Code2 className="w-4 h-4 text-blue-400 shrink-0" />
-              <span className="font-mono text-[10px] uppercase font-bold tracking-widest text-slate-400 truncate max-w-xs" title={selectedFilePath || ""}>
-                {selectedFilePath ? `Active: ${selectedFilePath}` : "Inspector Workspace"}
-              </span>
-              {isDirty && (
-                <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse shrink-0" title="未保存的修改" />
-              )}
-            </div>
+                {aiLoading && (
+                  <div className="flex items-center gap-1.5 p-1 text-[10px] text-slate-500 font-mono animate-pulse">
+                    <span className="w-1.5 h-1.5 bg-blue-400 rounded-full animate-bounce duration-300" />
+                    <span>Agent 正在执行自主决策与自愈循环...</span>
+                  </div>
+                )}
 
-            {/* Editor Action Buttons */}
-            <div className="flex items-center gap-1.5">
-              {/* Toggle AI Panel Button */}
-              <button
-                onClick={() => setShowAiPanel(!showAiPanel)}
-                className={`px-2 py-1 rounded text-[10px] font-mono font-bold uppercase flex items-center gap-1.5 transition-all cursor-pointer ${
-                  showAiPanel 
-                    ? "bg-blue-950/40 border border-blue-500/20 text-blue-400"
-                    : "bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300"
-                }`}
-                title={showAiPanel ? "关闭 AI 智能面板" : "开启 AI 智能面板"}
-              >
-                <Sparkles className="w-3.5 h-3.5 animate-pulse" />
-                <span>AI Copilot</span>
-              </button>
+                {aiError && (
+                  <div className="p-3 rounded border border-rose-900/30 bg-rose-950/20 text-rose-400 text-xs font-mono whitespace-pre-wrap leading-relaxed">
+                    ❌ {aiError}
+                  </div>
+                )}
 
-              <span className="text-slate-800">|</span>
-
-              {selectedFilePath && (
-                <>
-                  {/* Edit/Preview Toggle button */}
-                  {!isImageFile(selectedFilePath) && (
-                    <button
-                      onClick={() => setIsEditing(!isEditing)}
-                      className="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded text-[10px] font-mono font-bold uppercase flex items-center gap-1 transition-colors cursor-pointer border border-slate-700/60"
-                    >
-                      <Eye className="w-3.5 h-3.5" />
-                      {isEditing ? "Preview" : "Edit"}
-                    </button>
-                  )}
-
-                  {/* Save button */}
-                  {(isEditing || isDirty) && (
-                    <button
-                      onClick={handleSaveFile}
-                      disabled={saveStatus === "saving"}
-                      className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold font-mono text-[10px] uppercase rounded flex items-center gap-1 transition-all cursor-pointer shadow-sm shadow-emerald-950"
-                    >
-                      <Save className="w-3.5 h-3.5" />
-                      {saveStatus === "saving" ? "Saving..." : "Save"}
-                    </button>
-                  )}
-                </>
-              )}
-            </div>
-          </div>
-
-          {/* Interactive Rendering Body */}
-          <div className="flex-1 flex flex-col bg-[#020617] text-slate-300 overflow-hidden relative">
-            {selectedFilePath ? (
-              isImageFile(selectedFilePath) ? (
-                /* IMAGE PREVIEW MODE */
-                <div className="flex-1 flex flex-col items-center justify-center p-6 bg-[linear-gradient(45deg,#0e1524_25%,transparent_25%),linear-gradient(-45deg,#0e1524_25%,transparent_25%),linear-gradient(45deg,transparent_75%,#0e1524_75%),linear-gradient(-45deg,transparent_75%,#0e1524_75%)] bg-[size:16px_16px] bg-[position:0_0,0_8px,8px_-8px,-8px_0] overflow-auto">
-                  <div className="max-w-full max-h-[400px] flex flex-col items-center gap-3">
-                    <img
-                      src={`/api/workspace/image?path=${encodeURIComponent(selectedFilePath)}`}
-                      alt={selectedFilePath}
-                      className="max-w-full max-h-[350px] object-contain rounded-lg border border-[#1F2937] shadow-2xl bg-black"
-                    />
-                    <div className="bg-[#111827]/90 px-3 py-1 rounded text-[10px] font-mono text-slate-400 flex items-center gap-1.5 border border-slate-800">
-                      <ImageIcon className="w-3 h-3 text-emerald-400" />
-                      <span>{selectedFilePath}</span>
+                {/* SELF HEALING CTA PANEL */}
+                {hasExtractedCode && !aiLoading && (
+                  <div className="sticky bottom-0 left-0 right-0 p-2.5 border border-emerald-500/20 bg-emerald-950/30 rounded mt-5 flex flex-col gap-1.5 shadow-xl backdrop-blur-sm animate-in zoom-in-95 duration-150">
+                    <div className="flex items-center gap-1.5">
+                      <Check className="w-3.5 h-3.5 text-emerald-400" />
+                      <span className="text-[9px] font-mono text-emerald-400 font-bold uppercase">检测到 AI 生成的可用代码</span>
                     </div>
+                    <button
+                      onClick={handleApplyAiSuggestion}
+                      className="w-full py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold font-mono text-[10px] uppercase rounded cursor-pointer transition-all flex items-center justify-center gap-1 shadow shadow-emerald-950"
+                    >
+                      <Copy className="w-3 h-3" />
+                      <span>一键应用并覆盖编辑器代码</span>
+                    </button>
                   </div>
-                </div>
-              ) : isMarkdownFile(selectedFilePath) && !isEditing ? (
-                /* MARKDOWN PREVIEW MODE */
-                <div className="flex-1 p-5 overflow-y-auto select-text bg-[#030712] prose-invert max-w-none">
-                  <div className="markdown-body text-xs text-slate-300 leading-relaxed space-y-2">
-                    <Markdown>{fileContent || "*这是一个空文件*"}</Markdown>
-                  </div>
-                </div>
-              ) : isJsonFile(selectedFilePath) && !isEditing ? (
-                /* BEAUTIFIED JSON INSPECTOR */
-                <div className="flex-1 p-4 overflow-y-auto font-mono text-xs text-blue-300 select-text bg-[#030712]">
-                  <pre className="whitespace-pre-wrap leading-relaxed">
-                    {(() => {
-                      try {
-                        return JSON.stringify(JSON.parse(fileContent), null, 2);
-                      } catch (e) {
-                        return fileContent || "// 空的 JSON 数据或解析失败";
-                      }
-                    })()}
-                  </pre>
-                </div>
-              ) : isEditing ? (
-                /* TEXT CODE EDITOR TEXTAREA */
-                <textarea
-                  value={fileContent}
-                  onChange={(e) => setFileContent(e.target.value)}
-                  className="w-full h-full p-4 font-mono text-xs bg-transparent text-slate-300 border-none outline-none focus:ring-0 resize-none leading-relaxed select-text select-all"
-                  spellCheck={false}
-                />
-              ) : (
-                /* SOURCE TEXT VIEW PRE */
-                <pre className="w-full h-full p-4 font-mono text-xs overflow-auto select-text leading-relaxed whitespace-pre-wrap text-slate-400 bg-[#020617]/70">
-                  {fileContent || <span className="text-slate-600 italic">// Empty file</span>}
-                </pre>
-              )
-            ) : (
-              /* EMPTY INSPECT WORKSPACE */
-              <div className="flex-1 flex flex-col items-center justify-center p-12 text-center text-slate-600 font-sans">
-                <FileText className="w-10 h-10 mb-3 text-slate-800" />
-                <h3 className="text-xs uppercase font-mono tracking-widest text-slate-500 font-bold">请选择或创建沙箱文件</h3>
-                <p className="text-[10px] text-slate-700 max-w-xs mt-1.5 leading-normal">
-                  您可以从左侧树桩选择任务输出的 TXT、JSON 格式日志、运行产生的 PNG 图片，或者一键引入右侧 AI 设计模板起步运行。
-                </p>
-              </div>
-            )}
+                )}
 
-            {/* SAVE STATUS INDICATORS */}
-            {saveStatus === "saved" && (
-              <div className="absolute top-4 right-4 bg-emerald-600 border border-emerald-500/30 text-white text-[10px] font-mono font-bold uppercase px-2.5 py-1 rounded shadow-lg animate-in fade-in zoom-in duration-150">
-                ✓ File Saved Successfully
+                <div ref={chatBottomRef} />
               </div>
-            )}
-            {saveStatus === "error" && (
-              <div className="absolute top-4 right-4 bg-rose-600 border border-rose-500/30 text-white text-[10px] font-mono font-bold uppercase px-2.5 py-1 rounded shadow-lg animate-in fade-in zoom-in duration-150">
-                ⚠ Failed to Save File
-              </div>
-            )}
+
+              {/* Chat Input interface */}
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  if (customPrompt.trim()) handleCallAiCopilot("custom");
+                }}
+                className="p-2 border-t border-[#1F2937] bg-[#111827] flex gap-1.5 shrink-0"
+              >
+                <input
+                  type="text"
+                  disabled={aiLoading || (aiScope === "single" && !selectedFilePath)}
+                  placeholder={
+                    aiScope === "project"
+                      ? selectedProjectFiles.length > 0
+                        ? `提问选中的 ${selectedProjectFiles.length} 个文件...`
+                        : "提问或一键全盘检索整个工作区..."
+                      : selectedFilePath
+                      ? "关于此文件你有什么疑问？..."
+                      : "请先选择需要分析的文件"
+                  }
+                  value={customPrompt}
+                  onChange={(e) => setCustomPrompt(e.target.value)}
+                  className="flex-1 px-2.5 py-1.5 bg-[#020617] border border-[#1F2937] rounded text-slate-200 text-xs focus:outline-none focus:border-blue-500/50 disabled:opacity-50 placeholder-slate-700 font-mono"
+                />
+                <button
+                  type="submit"
+                  disabled={aiLoading || (aiScope === "single" && !selectedFilePath) || !customPrompt.trim()}
+                  className="px-2.5 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800 disabled:text-slate-600 text-white font-bold font-mono text-[10px] rounded cursor-pointer transition-colors"
+                >
+                  Send
+                </button>
+              </form>
+            </div>
           </div>
-        </div>
+        )}
       </div>
 
-      {/* 3. AI WORKSPACE COPILOT & TEMPLATE (Right Panel - Span 4) */}
-      {showAiPanel && (
-        <div className="lg:col-span-4 flex flex-col bg-[#0F172A] border border-[#1F2937] rounded overflow-hidden shadow-xl h-[650px] animate-in fade-in slide-in-from-right-3 duration-200">
-          
-          {/* Tabs header */}
-          <div className="border-b border-[#1F2937] bg-[#111827] flex p-1 justify-between items-center">
+      {/* RIGHT PANEL: COCKPIT WORKBENCH (Span 7) */}
+      <div className="lg:col-span-7 flex flex-col gap-4 h-full">
+        {/* Main Tabbed Container (540px) */}
+        <div className="flex-1 flex flex-col bg-[#0F172A] border border-[#1F2937] rounded-lg overflow-hidden shadow-xl relative animate-in fade-in duration-200">
+          {/* Tabs Navigation */}
+          <div className="border-b border-[#1F2937] bg-[#111827] flex p-1 justify-between items-center shrink-0">
             <div className="flex gap-1">
               <button
-                onClick={() => setActiveTab("ai")}
+                onClick={() => setRightTab("preview")}
                 className={`px-3 py-1.5 rounded text-[10px] font-mono font-bold uppercase flex items-center gap-1.5 transition-all cursor-pointer ${
-                  activeTab === "ai"
+                  rightTab === "preview"
                     ? "bg-[#020617] text-blue-400 border border-[#1F2937]"
                     : "text-slate-500 hover:text-slate-300"
                 }`}
               >
-                <Sparkles className="w-3.5 h-3.5 text-blue-400" />
-                <span>AI Copilot</span>
+                <Activity className="w-3.5 h-3.5 text-blue-400 animate-pulse" />
+                <span>运行预览 & 步骤 logs</span>
               </button>
               <button
-                onClick={() => setShowSessionsSidebar(prev => !prev)}
+                onClick={() => setRightTab("code")}
                 className={`px-3 py-1.5 rounded text-[10px] font-mono font-bold uppercase flex items-center gap-1.5 transition-all cursor-pointer ${
-                  showSessionsSidebar
-                    ? "bg-[#020617] text-amber-400 border border-[#1F2937]"
+                  rightTab === "code"
+                    ? "bg-[#020617] text-emerald-400 border border-[#1F2937]"
                     : "text-slate-500 hover:text-slate-300"
                 }`}
-                title="查看/管理历史对话"
               >
-                <History className="w-3.5 h-3.5 text-amber-400" />
-                <span>历史记录</span>
+                <Code2 className="w-3.5 h-3.5 text-emerald-400" />
+                <span>代码逻辑 & 文件管理</span>
               </button>
               <button
-                onClick={() => setActiveTab("template")}
+                onClick={() => setRightTab("index")}
                 className={`px-3 py-1.5 rounded text-[10px] font-mono font-bold uppercase flex items-center gap-1.5 transition-all cursor-pointer ${
-                  activeTab === "template"
+                  rightTab === "index"
                     ? "bg-[#020617] text-purple-400 border border-[#1F2937]"
                     : "text-slate-500 hover:text-slate-300"
                 }`}
               >
-                <FileCode className="w-3.5 h-3.5 text-purple-400" />
-                <span>极速模板</span>
+                <Search className="w-3.5 h-3.5 text-purple-400" />
+                <span>仓库符号检索 (Repo Index)</span>
               </button>
             </div>
-            <button
-              onClick={() => setShowAiPanel(false)}
-              className="p-1 hover:bg-slate-800 text-slate-500 hover:text-slate-300 rounded"
-              title="隐藏 AI 面板"
-            >
-              <X className="w-3.5 h-3.5" />
-            </button>
+            
+            {/* Context File info if on Code tab */}
+            {rightTab === "code" && selectedFilePath && (
+              <span className="text-[10px] font-mono text-slate-500 truncate max-w-[200px] pr-2">
+                {selectedFilePath.split("/").pop()}
+              </span>
+            )}
           </div>
 
-          {/* TAB 1: AI ASSISTANT PORTAL */}
-          {activeTab === "ai" && (
-            <div className="flex-1 flex overflow-hidden relative">
-              {/* Sessions Sidebar */}
-              {showSessionsSidebar && (
-                <div className="w-[180px] shrink-0 border-r border-[#1F2937] bg-[#0A0B0E]/80 flex flex-col overflow-hidden animate-in slide-in-from-left duration-150">
-                  <div className="p-2 border-b border-[#1F2937] flex items-center justify-between shrink-0 bg-[#111827]">
-                    <span className="text-[9px] font-mono font-bold text-slate-400 uppercase tracking-widest">对话历史</span>
-                    <button
-                      onClick={() => handleCreateSession()}
-                      className="px-1.5 py-0.5 bg-blue-900/30 hover:bg-blue-900/60 text-blue-400 border border-blue-500/20 text-[9px] font-mono rounded font-bold cursor-pointer transition-colors"
-                      title="新建对话"
-                    >
-                      + 新建
-                    </button>
+          {/* TAB CONTENT: 1. PREVIEW & RUN LOGS TIMELINE */}
+          {rightTab === "preview" && (
+            <div className="flex-1 flex flex-col overflow-hidden bg-[#020617] p-4 text-slate-300">
+              {/* Cockpit Diagnostic Dashboard */}
+              <div className="p-3 bg-[#0A0F1D]/60 border border-[#1F2937] rounded-lg mb-4 flex items-center justify-between gap-4 shrink-0 select-none">
+                <div className="flex items-center gap-3">
+                  <div className="p-2 bg-blue-950/40 rounded-full border border-blue-500/20">
+                    <Cpu className="w-5 h-5 text-blue-400 animate-pulse" />
                   </div>
-                  <div className="flex-1 overflow-y-auto p-1 space-y-1">
-                    {sessions.length === 0 ? (
-                      <div className="text-[10px] text-slate-600 text-center py-6 font-mono">暂无对话记录</div>
-                    ) : (
-                      sessions.map(s => {
-                        const isSelected = s.id === currentSessionId;
-                        const isEditing = s.id === editingSessionId;
-                        return (
-                          <div
-                            key={s.id}
-                            onClick={() => {
-                              setCurrentSessionId(s.id);
-                              const lastMsg = s.messages && s.messages.length > 0 ? s.messages[s.messages.length - 1] : null;
-                              setAiResponse(lastMsg && lastMsg.role === "model" ? lastMsg.parts[0].text : "");
-                              setAiError(null);
-                            }}
-                            className={`p-2 rounded text-[11px] group relative flex flex-col cursor-pointer transition-colors ${
-                              isSelected
-                                ? "bg-blue-950/40 border border-blue-500/20 text-blue-300"
-                                : "text-slate-400 hover:bg-slate-800/50 hover:text-slate-200"
-                            }`}
-                          >
-                            <div className="flex-1 min-w-0 pr-6">
-                              {isEditing ? (
-                                <input
-                                  type="text"
-                                  autoFocus
-                                  value={editingSessionTitle}
-                                  onChange={e => setEditingSessionTitle(e.target.value)}
-                                  onBlur={() => handleRenameSession(s.id, editingSessionTitle)}
-                                  onKeyDown={e => {
-                                    if (e.key === "Enter") handleRenameSession(s.id, editingSessionTitle);
-                                    if (e.key === "Escape") setEditingSessionId(null);
-                                  }}
-                                  className="w-full bg-slate-900 border border-blue-500 rounded px-1 text-[11px] text-slate-200 outline-none"
-                                />
-                              ) : (
-                                <div className="truncate font-medium">{s.title || "新对话"}</div>
-                              )}
-                              <div className="text-[8px] text-slate-600 font-mono mt-0.5">
-                                {new Date(s.updatedAt || s.createdAt).toLocaleDateString("zh-CN", {
-                                  month: "numeric",
-                                  day: "numeric",
-                                  hour: "2-digit",
-                                  minute: "2-digit"
-                                })}
-                              </div>
-                            </div>
-                            
-                            {!isEditing && (
-                              <div className="absolute right-1 top-2.5 opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1.5 pl-2">
-                                <button
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    setEditingSessionId(s.id);
-                                    setEditingSessionTitle(s.title || "新对话");
-                                  }}
-                                  className="text-[10px] text-slate-500 hover:text-slate-300"
-                                  title="重命名"
-                                >
-                                  ✏️
-                                </button>
-                                <button
-                                  onClick={(e) => handleDeleteSession(s.id, e)}
-                                  className="text-slate-500 hover:text-rose-400"
-                                  title="删除"
-                                >
-                                  <Trash2 className="w-2.5 h-2.5" />
-                                </button>
-                              </div>
-                            )}
-                          </div>
-                        );
-                      })
-                    )}
+                  <div>
+                    <h4 className="text-xs font-mono font-bold text-slate-200">AGENT LIVE COCKPIT</h4>
+                    <p className="text-[9px] text-slate-500">Autonomous Step-by-Step Command & Action Monitor</p>
                   </div>
                 </div>
-              )}
-
-              {/* Chat Main Area */}
-              <div className="flex-1 flex flex-col overflow-hidden">
-                {/* Scope Toggler */}
-                <div className="p-2 border-b border-[#1F2937]/80 bg-[#111827]/60 flex items-center justify-between gap-2.5 shrink-0">
-                  <span className="text-[10px] font-mono font-bold uppercase text-slate-400">分析范围 / SCOPE:</span>
-                  <div className="flex bg-[#020617] p-0.5 rounded border border-[#1F2937] text-[10px] font-mono">
-                    <button
-                      type="button"
-                      onClick={() => setAiScope("single")}
-                      className={`px-2.5 py-1 rounded font-bold transition-all cursor-pointer ${
-                        aiScope === "single"
-                          ? "bg-blue-600 text-white font-extrabold"
-                          : "text-slate-500 hover:text-slate-300"
-                      }`}
-                    >
-                      单文件
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setAiScope("project")}
-                      className={`px-2.5 py-1 rounded font-bold transition-all relative cursor-pointer ${
-                        aiScope === "project"
-                          ? "bg-blue-600 text-white font-extrabold"
-                          : "text-slate-500 hover:text-slate-300"
-                      }`}
-                    >
-                      项目级 ({selectedProjectFiles.length}个文件)
-                      {selectedProjectFiles.length > 0 && (
-                        <span className="absolute -top-1 -right-1 flex h-2 w-2">
-                          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                          <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
-                        </span>
-                      )}
-                    </button>
+                <div className="flex gap-4 font-mono text-right shrink-0">
+                  <div>
+                    <p className="text-[9px] text-slate-500">EXEC STEPS</p>
+                    <p className="text-xs font-bold text-blue-400">{allExecutedActions.length}</p>
+                  </div>
+                  <div>
+                    <p className="text-[9px] text-slate-500">STATUS</p>
+                    <p className={`text-xs font-bold ${aiLoading ? "text-amber-400 animate-pulse" : "text-emerald-400"}`}>
+                      {aiLoading ? "THINKING" : "STANDBY"}
+                    </p>
                   </div>
                 </div>
+              </div>
 
-                {/* Active Model Pool HUD */}
-                <div className="px-3 py-1.5 border-b border-[#1F2937]/65 bg-[#080E1A] flex items-center justify-between gap-2 shrink-0 select-none">
-                  <div className="flex items-center gap-1.5 overflow-hidden">
-                    <span className="relative flex h-2 w-2 shrink-0">
-                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                      <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
-                    </span>
-                    <span className="text-[9px] font-mono font-bold text-slate-400 truncate uppercase tracking-wider">
-                      Active Model Pool Connected
-                    </span>
+              {/* Compressed Steps Scroll Area */}
+              <div className="flex-1 overflow-y-auto custom-scrollbar space-y-3 pr-1 select-text">
+                {allExecutedActions.length === 0 ? (
+                  <div className="h-full flex flex-col items-center justify-center text-center p-8 border border-dashed border-[#1F2937]/50 rounded-lg bg-slate-900/10">
+                    <Activity className="w-10 h-10 text-slate-800 mb-3 animate-pulse" />
+                    <h5 className="text-xs uppercase font-mono tracking-widest text-slate-400 font-bold">等待多步自主规划与指令运行...</h5>
+                    <p className="text-[10px] text-slate-600 max-w-sm mt-1.5 leading-normal font-sans">
+                      您可以在左侧聊天框输入复杂的系统升级、重构或脚本测试指令。Agent 将在这里实时、逐步展示执行轨迹与自愈日志。
+                    </p>
                   </div>
-                  <div className="flex items-center gap-1 shrink-0">
-                    <span className="px-1.5 py-0.5 bg-[#020617] text-[9px] font-mono text-blue-400 rounded border border-[#1F2937]">
-                      Gemini 3.5 Flash
-                    </span>
-                    <span className="px-1.5 py-0.5 bg-emerald-950/40 text-[9px] font-mono text-emerald-400 rounded border border-emerald-900/30">
-                      No-Cost Pool
-                    </span>
-                  </div>
-                </div>
+                ) : (
+                  <div className="relative pl-4 border-l border-slate-800 space-y-4">
+                    {allExecutedActions.map((action: any, aIdx: number) => {
+                      const isCommand = action.type === "run_command";
+                      const isFile = action.type === "create_file" || action.type === "write_file";
+                      return (
+                        <div key={aIdx} className="relative group/step animate-in slide-in-from-top-1 duration-200">
+                          {/* Circle marker */}
+                          <div className={`absolute -left-[21px] top-1 w-2.5 h-2.5 rounded-full border-2 ${
+                            action.success 
+                              ? "bg-emerald-500 border-emerald-950" 
+                              : "bg-rose-500 border-rose-950"
+                          } shadow-sm shadow-black`} />
 
-                {/* Quick Prompt Command Matrix */}
-                {(aiScope === "project" || selectedFilePath) && (
-                  <div className="p-3 bg-[#0A0F1D]/50 border-b border-[#1F2937] space-y-1.5 shrink-0 animate-in fade-in duration-200">
-                    <div className="flex justify-between items-center mb-1">
-                      <span className="text-[9px] font-mono font-bold text-slate-500 uppercase tracking-widest block">AI Quick Analysis (一键智能深度透视)</span>
-                      <span className="text-[9px] font-mono font-bold bg-blue-950/60 text-blue-400 px-1.5 py-0.5 rounded border border-blue-900/40 font-mono">
-                        {aiScope === "project" ? `项目分析 (${selectedProjectFiles.length}个文件)` : `单文件: ${selectedFilePath?.split("/").pop()}`}
-                      </span>
-                    </div>
-                    {aiScope === "project" && selectedProjectFiles.length === 0 && (
-                      <div className="p-2 border border-amber-500/20 bg-amber-950/20 rounded text-[10px] text-amber-400 leading-normal mb-1 font-mono">
-                        💡 提示：您尚未在左侧勾选特定文件。项目分析将默认搜索并分析整个工作区内的主要 logic 和配置上下文！
-                      </div>
-                    )}
-                    <div className="grid grid-cols-2 gap-2">
-                      <button
-                        onClick={() => handleCallAiCopilot("explain")}
-                        disabled={aiLoading}
-                        className="py-1.5 px-2 bg-slate-800/80 hover:bg-slate-700 border border-slate-700/50 rounded flex items-center justify-center gap-1.5 text-[10px] font-bold text-slate-300 cursor-pointer transition-colors"
-                      >
-                        <Settings className="w-3.5 h-3.5 text-blue-400" />
-                        <span>{aiScope === "project" ? "一键解构项目" : "解读文件逻辑"}</span>
-                      </button>
-                      <button
-                        onClick={() => handleCallAiCopilot("optimize")}
-                        disabled={aiLoading}
-                        className="py-1.5 px-2 bg-slate-800/80 hover:bg-slate-700 border border-slate-700/50 rounded flex items-center justify-center gap-1.5 text-[10px] font-bold text-slate-300 cursor-pointer transition-colors"
-                      >
-                        <Cpu className="w-3.5 h-3.5 text-emerald-400 animate-pulse" />
-                        <span>{aiScope === "project" ? "项目重构优化" : "性能与重构优化"}</span>
-                      </button>
-                      <button
-                        onClick={() => handleCallAiCopilot("fix-bugs")}
-                        disabled={aiLoading}
-                        className="py-1.5 px-2 bg-slate-800/80 hover:bg-slate-700 border border-slate-700/50 rounded flex items-center justify-center gap-1.5 text-[10px] font-bold text-slate-300 cursor-pointer transition-colors"
-                      >
-                        <Activity className="w-3.5 h-3.5 text-rose-400" />
-                        <span>{aiScope === "project" ? "项目缺陷扫描" : "代码缺陷排查"}</span>
-                      </button>
-                      <button
-                        onClick={() => handleCallAiCopilot("data-summary")}
-                        disabled={aiLoading}
-                        className="py-1.5 px-2 bg-slate-800/80 hover:bg-slate-700 border border-slate-700/50 rounded flex items-center justify-center gap-1.5 text-[10px] font-bold text-slate-300 cursor-pointer transition-colors"
-                      >
-                        <FileText className="w-3.5 h-3.5 text-purple-400" />
-                        <span>{aiScope === "project" ? "跨文件数据提炼" : "数据提炼洞察"}</span>
-                      </button>
-                    </div>
-                  </div>
-                )}
-
-                {!(aiScope === "project" || selectedFilePath) && (
-                  <div className="p-4 text-center border-b border-[#1F2937] bg-[#0A0B0E]/20 text-[10px] font-mono text-slate-500 shrink-0">
-                    ⚠️ 请在左侧文件树中先点击选择一个文件，以解锁 AI 协同能力
-                  </div>
-                )}
-
-                {/* Stream output panel */}
-                <div className="flex-1 overflow-y-auto p-4 bg-[#030712] relative space-y-4 select-text">
-                  {(() => {
-                    const activeSession = sessions.find(s => s.id === currentSessionId);
-                    if (activeSession && activeSession.messages && activeSession.messages.length > 0) {
-                      return activeSession.messages.map((msg: any, idx: number) => {
-                        const isUser = msg.role === "user";
-                        return (
-                          <div
-                            key={idx}
-                            className={`flex flex-col ${isUser ? "items-end" : "items-start"} animate-in fade-in slide-in-from-bottom-2 duration-150`}
-                          >
-                            <div className="flex items-center gap-1 text-[9px] text-slate-500 font-mono mb-1 px-1">
-                              <span>{isUser ? "You" : "Copilot"}</span>
-                              <span>•</span>
-                              <span>
-                                {new Date(msg.timestamp).toLocaleTimeString("zh-CN", {
-                                  hour: "2-digit",
-                                  minute: "2-digit"
-                                })}
+                          {/* Step Card */}
+                          <div className="p-3 bg-[#0A0B0E]/80 border border-[#1F2937] rounded-lg space-y-2 select-text hover:border-[#2A3F5F]/60 transition-colors">
+                            <div className="flex items-center justify-between gap-2 select-none">
+                              <span className="text-[10px] font-mono font-bold text-slate-400 uppercase tracking-widest flex items-center gap-1.5">
+                                <span>STEP #{aIdx + 1}</span>
+                                <span>•</span>
+                                <span className="text-blue-400">
+                                  {action.type === "create_file" || action.type === "write_file" ? "📁 WRITE_FILE" :
+                                   action.type === "mkdir" ? "📂 MKDIR" :
+                                   action.type === "delete_file" ? "🗑️ DELETE" :
+                                   action.type === "run_command" ? "⚙️ EXEC_CMD" : "🛠️ WORKSPACE_ACTION"}
+                                </span>
+                              </span>
+                              <span className={`px-1.5 py-0.5 rounded text-[8px] font-extrabold uppercase shrink-0 ${
+                                action.success ? "bg-emerald-950/60 text-emerald-400 border border-emerald-800/40" : "bg-rose-950/60 text-rose-400 border border-rose-800/40"
+                              }`}>
+                                {action.success ? "SUCCESS" : "FAILED"}
                               </span>
                             </div>
-                            <div
-                              className={`p-3 rounded-lg text-xs leading-relaxed max-w-[88%] select-text whitespace-normal break-words ${
-                                isUser
-                                  ? "bg-blue-600/25 border border-blue-500/20 text-slate-200"
-                                  : "bg-[#0A0F1D]/80 border border-[#1F2937] text-slate-300 markdown-body leading-relaxed space-y-2"
-                              }`}
-                            >
-                              {isUser ? (
-                                <p className="whitespace-pre-wrap font-mono">{msg.displayPrompt || msg.parts[0]?.text}</p>
-                              ) : (
-                                <Markdown>{msg.parts[0]?.text || ""}</Markdown>
-                              )}
+
+                            <div className="text-xs font-mono font-bold text-slate-200 break-all select-all pl-1 border-l border-slate-800">
+                              {action.path || action.command}
                             </div>
 
-                            {/* Copilot visual task execution log HUD */}
-                            {!isUser && msg.executedActions && msg.executedActions.length > 0 && (
-                              <div className="mt-2 w-[88%] p-3 rounded-lg bg-[#050B14]/90 border border-emerald-950/50 space-y-2.5 animate-in fade-in slide-in-from-top-1 duration-150 shrink-0 select-text">
-                                <div className="flex items-center gap-1.5 text-[10px] font-mono font-bold text-emerald-400 uppercase tracking-wider select-none">
-                                  <Sparkles className="w-3.5 h-3.5 text-emerald-400 animate-pulse" />
-                                  <span>Copilot 自动任务执行日志 ({msg.executedActions.length})</span>
-                                </div>
-                                <div className="space-y-2 font-mono text-[11px] select-text">
-                                  {msg.executedActions.map((action: any, aIdx: number) => (
-                                    <div key={aIdx} className="flex flex-col gap-1.5 p-2 bg-[#02050A] rounded border border-slate-900 select-text">
-                                      <div className="flex items-center justify-between gap-2 select-none">
-                                        <span className="flex items-center gap-1.5 font-bold text-slate-300 truncate text-[10px]">
-                                          {action.type === "create_file" || action.type === "write_file" ? "📁 写入文件" :
-                                           action.type === "mkdir" ? "📂 创建目录" :
-                                           action.type === "delete_file" ? "🗑️ 物理删除" :
-                                           action.type === "run_command" ? "⚙️ 运行命令" : "🛠️ 执行操作"}:
-                                        </span>
-                                        <span className={`px-1.5 py-0.5 rounded text-[8px] font-extrabold uppercase shrink-0 ${
-                                          action.success ? "bg-emerald-950/60 text-emerald-400 border border-emerald-800/40" : "bg-rose-950/60 text-rose-400 border border-rose-800/40"
-                                        }`}>
-                                          {action.success ? "成功" : "失败"}
-                                        </span>
-                                      </div>
-                                      <div className="text-blue-400 select-all break-all text-[10px] font-bold pl-1 border-l border-slate-800">
-                                        {action.path || action.command}
-                                      </div>
-                                      {action.error && (
-                                        <div className="text-rose-400 text-[10px] pl-1 border-l border-rose-500/50 mt-1">{action.error}</div>
-                                      )}
-                                      {action.type === "run_command" && action.output && (
-                                        <details className="mt-1 select-text">
-                                          <summary className="text-[10px] text-slate-500 hover:text-slate-300 cursor-pointer select-none">显示终端控制台输出...</summary>
-                                          <pre className="mt-1 p-2 bg-black text-slate-400 rounded text-[9px] max-h-32 overflow-y-auto whitespace-pre-wrap select-text selection:bg-slate-800">{action.output}</pre>
-                                        </details>
-                                      )}
-                                      {(action.type === "create_file" || action.type === "write_file") && (
-                                        <div className="flex items-center justify-between mt-1 pt-1.5 border-t border-slate-900/60 select-none">
-                                          <span className="text-[9px] text-slate-500">{action.size} 字符</span>
-                                          <button
-                                            type="button"
-                                            onClick={() => handleFileClick(action.path)}
-                                            className="px-2 py-0.5 bg-blue-950 hover:bg-blue-900 text-blue-300 border border-blue-900 rounded text-[10px] cursor-pointer transition-colors"
-                                          >
-                                            在编辑器打开
-                                          </button>
-                                        </div>
-                                      )}
-                                    </div>
-                                  ))}
-                                </div>
+                            {action.error && (
+                              <div className="text-rose-400 text-[10px] font-mono pl-1.5 border-l border-rose-500/50 mt-1">
+                                {action.error}
+                              </div>
+                            )}
+
+                            {isCommand && action.output && (
+                              <details className="mt-1.5 select-text" open={aIdx === allExecutedActions.length - 1}>
+                                <summary className="text-[9px] font-mono text-slate-500 hover:text-slate-300 cursor-pointer select-none">
+                                  查看控制台输出...
+                                </summary>
+                                <pre className="mt-1.5 p-2.5 bg-black/85 text-slate-400 rounded text-[10px] max-h-52 overflow-y-auto whitespace-pre-wrap select-text selection:bg-slate-800 leading-relaxed font-mono custom-scrollbar">
+                                  {action.output}
+                                </pre>
+                              </details>
+                            )}
+
+                            {isFile && (
+                              <div className="flex items-center justify-between mt-2 pt-2 border-t border-slate-900 select-none">
+                                <span className="text-[9px] text-slate-600 font-mono">{action.size} 字符</span>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setRightTab("code");
+                                    handleFileClick(action.path);
+                                  }}
+                                  className="px-2 py-0.5 bg-blue-950 hover:bg-blue-900 text-blue-300 border border-blue-900 rounded text-[9px] font-mono font-bold cursor-pointer transition-colors"
+                                >
+                                  在编辑器打开
+                                </button>
                               </div>
                             )}
                           </div>
-                        );
-                      });
-                    }
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
 
-                    if (aiLoading) {
-                      return (
-                        <div className="flex flex-col items-center justify-center py-20 gap-3">
-                          <div className="flex items-center gap-1">
-                            <span className="w-2 h-2 bg-blue-400 rounded-full animate-bounce duration-300 [animation-delay:-0.3s]" />
-                            <span className="w-2 h-2 bg-blue-400 rounded-full animate-bounce duration-300 [animation-delay:-0.15s]" />
-                            <span className="w-2 h-2 bg-blue-400 rounded-full animate-bounce duration-300" />
+          {/* TAB CONTENT: 2. CODE EDITOR & FILES TREE DUAL PANE */}
+          {rightTab === "code" && (
+            <div className="flex-1 grid grid-cols-1 md:grid-cols-12 overflow-hidden h-full">
+              {/* Inner Left Pane: Files tree (Span 4) */}
+              <div className="md:col-span-4 border-r border-[#1F2937]/50 flex flex-col bg-[#0A0B0E]/60 h-full overflow-hidden">
+                {/* Search / Tree Type */}
+                <div className="p-2 border-b border-[#1F2937] shrink-0 space-y-2 bg-[#111827]/40">
+                  <div className="relative">
+                    <Search className="absolute left-2 top-2.5 w-3 h-3 text-slate-500" />
+                    <input
+                      type="text"
+                      placeholder="检索工作区文件..."
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                      className="w-full pl-7 pr-2.5 py-1.5 bg-[#020617] border border-[#1F2937] rounded text-[11px] text-slate-300 outline-none font-mono"
+                    />
+                  </div>
+                  <div className="flex justify-between items-center gap-1">
+                    <button
+                      onClick={() => setTreeViewMode("core")}
+                      className={`flex-1 py-1 px-1.5 rounded text-[9px] font-mono font-bold text-center border cursor-pointer transition-colors ${
+                        treeViewMode === "core"
+                          ? "bg-blue-950/40 text-blue-400 border-blue-500/20"
+                          : "bg-slate-900/30 text-slate-500 border-transparent hover:text-slate-300"
+                      }`}
+                    >
+                      开发
+                    </button>
+                    <button
+                      onClick={() => setTreeViewMode("test")}
+                      className={`flex-1 py-1 px-1.5 rounded text-[9px] font-mono font-bold text-center border cursor-pointer transition-colors ${
+                        treeViewMode === "test"
+                          ? "bg-amber-950/40 text-amber-400 border-amber-500/20"
+                          : "bg-slate-900/30 text-slate-500 border-transparent hover:text-slate-300"
+                      }`}
+                    >
+                      沙箱
+                    </button>
+                    <button
+                      onClick={() => setTreeViewMode("trash")}
+                      className={`flex-1 py-1 px-1.5 rounded text-[9px] font-mono font-bold text-center border cursor-pointer transition-colors ${
+                        treeViewMode === "trash"
+                          ? "bg-rose-950/40 text-rose-400 border-rose-500/20"
+                          : "bg-slate-900/30 text-slate-500 border-transparent hover:text-slate-300"
+                      }`}
+                    >
+                      回收站
+                    </button>
+                  </div>
+                </div>
+
+                {/* Tree Scroller */}
+                <div className="flex-1 overflow-y-auto custom-scrollbar p-2">
+                  {treeViewMode === "trash" ? (
+                    trashLoading ? (
+                      <div className="text-center py-6 text-[10px] text-slate-600 animate-pulse font-mono">[TRASH_SYNC] 同步回收站...</div>
+                    ) : trashItems.length === 0 ? (
+                      <div className="text-center py-6 text-[10px] text-slate-600 font-mono">回收站空空如也</div>
+                    ) : (
+                      <div className="space-y-1.5">
+                        <button
+                          onClick={handleEmptyTrash}
+                          className="w-full py-1 bg-rose-950/30 hover:bg-rose-950/70 text-rose-400 border border-rose-500/20 text-[10px] font-mono rounded font-bold cursor-pointer transition-colors uppercase mb-2"
+                        >
+                          🗑️ 物理彻底清空
+                        </button>
+                        {trashItems.map((item: any) => (
+                          <div key={item.id} className="p-1.5 bg-[#0A0B0E] border border-[#1F2937] rounded flex items-center justify-between text-[11px] font-mono">
+                            <span className="truncate pr-2 text-slate-400" title={item.name}>{item.name}</span>
+                            <div className="flex gap-1.5 shrink-0">
+                              <button onClick={() => handleRestoreTrashItem(item.id)} className="text-emerald-500 hover:text-emerald-400 font-bold">还原</button>
+                              <button onClick={() => handlePermanentDeleteTrashItem(item.id)} className="text-rose-500 hover:text-rose-400">粉碎</button>
+                            </div>
                           </div>
-                          <span className="text-[10px] font-mono text-slate-500 uppercase tracking-wider animate-pulse">Copilot 正在聚合分析上下文...</span>
-                        </div>
-                      );
-                    }
-
-                    if (aiError) {
-                      return (
-                        <div className="p-3 rounded border border-rose-900/30 bg-rose-950/20 text-rose-400 text-xs font-mono whitespace-pre-wrap leading-relaxed">
-                          ❌ {aiError}
-                        </div>
-                      );
-                    }
-
-                    return (
-                      <div className="text-center py-24 text-slate-600 font-sans">
-                        <Sparkles className="w-8 h-8 text-slate-800 mx-auto mb-2 animate-pulse" />
-                        <p className="text-[10px] uppercase font-mono tracking-wider">AI Copilot Interactive Frame</p>
-                        <p className="text-[9px] text-slate-700 mt-1 max-w-[200px] mx-auto">点击一键分析或在下方输入框中向 AI 提问。</p>
+                        ))}
                       </div>
-                    );
-                  })()}
-
-                  {/* Typing Indicator */}
-                  {aiLoading && (() => {
-                    const activeSession = sessions.find(s => s.id === currentSessionId);
-                    return activeSession && activeSession.messages && activeSession.messages.length > 0;
-                  })() && (
-                    <div className="flex items-center gap-1.5 p-1 text-[10px] text-slate-500 font-mono animate-pulse">
-                      <span className="w-1.5 h-1.5 bg-blue-400 rounded-full animate-bounce duration-300" />
-                      <span>Copilot 正在回复中...</span>
-                    </div>
+                    )
+                  ) : loading && files.length === 0 ? (
+                    <div className="text-center py-8 text-[10px] text-slate-600 animate-pulse font-mono">[SYNC_FILES]</div>
+                  ) : filteredFiles.length === 0 ? (
+                    <div className="text-center py-8 text-[10px] text-slate-600 font-mono">暂无匹配文件</div>
+                  ) : (
+                    renderFileTree(filteredFiles)
                   )}
+                </div>
 
-                  {/* SELF HEALING CTA PANEL: If AI has optimized/fixed code, render code healing bar */}
-                  {hasExtractedCode && !aiLoading && (
-                    <div className="sticky bottom-0 left-0 right-0 p-2.5 border border-emerald-500/20 bg-emerald-950/30 rounded mt-5 flex flex-col gap-1.5 shadow-xl backdrop-blur-sm animate-in zoom-in-95 duration-150">
-                      <div className="flex items-center gap-1.5">
-                        <Check className="w-3.5 h-3.5 text-emerald-400" />
-                        <span className="text-[9px] font-mono text-emerald-400 font-bold uppercase">检测到 AI 推荐的新版完整代码</span>
-                      </div>
+                {/* Inner File Creation Form */}
+                <form onSubmit={handleCreateItem} className="p-2 border-t border-[#1F2937] shrink-0 bg-[#111827]/40 space-y-1.5">
+                  <div className="flex gap-1">
+                    <button
+                      type="button"
+                      onClick={() => setNewItemType("file")}
+                      className={`flex-1 py-1 rounded text-[9px] font-mono font-bold text-center border cursor-pointer ${
+                        newItemType === "file" ? "bg-emerald-950/40 text-emerald-400 border-emerald-500/20" : "bg-[#020617] text-slate-500 border-[#1F2937]"
+                      }`}
+                    >
+                      + File
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setNewItemType("folder")}
+                      className={`flex-1 py-1 rounded text-[9px] font-mono font-bold text-center border cursor-pointer ${
+                        newItemType === "folder" ? "bg-amber-950/40 text-amber-400 border-amber-500/20" : "bg-[#020617] text-slate-500 border-[#1F2937]"
+                      }`}
+                    >
+                      + Dir
+                    </button>
+                  </div>
+                  {newItemType && (
+                    <div className="flex gap-1 animate-in slide-in-from-bottom-1 duration-150">
+                      <input
+                        type="text"
+                        autoFocus
+                        placeholder={newItemType === "file" ? "文件名 (e.g. app.py)..." : "目录路径..."}
+                        value={newItemName}
+                        onChange={(e) => setNewItemName(e.target.value)}
+                        className="flex-1 px-2 py-1 bg-[#020617] border border-[#1F2937] rounded text-[11px] text-slate-300 outline-none font-mono"
+                      />
                       <button
-                        onClick={handleApplyAiSuggestion}
-                        className="w-full py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold font-mono text-[10px] uppercase rounded cursor-pointer transition-all flex items-center justify-center gap-1 shadow shadow-emerald-950"
+                        type="submit"
+                        className="px-2 py-1 bg-blue-600 hover:bg-blue-500 text-white rounded font-mono text-[10px] font-bold"
                       >
-                        <Copy className="w-3 h-3" />
-                        <span>一键应用并覆盖编辑器代码</span>
+                        ✓
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setNewItemType(null)}
+                        className="px-2 py-1 bg-slate-800 text-slate-400 rounded font-mono text-[10px]"
+                      >
+                        ✕
                       </button>
                     </div>
                   )}
-
-                  {/* Ref marker for auto-scrolling */}
-                  <div ref={chatBottomRef} />
-                </div>
-
-                {/* Chat Input interface */}
-                <form
-                  onSubmit={(e) => {
-                    e.preventDefault();
-                    if (customPrompt.trim()) handleCallAiCopilot("custom");
-                  }}
-                  className="p-2 border-t border-[#1F2937] bg-[#111827] flex gap-1.5 shrink-0"
-                >
-                  <input
-                    type="text"
-                    disabled={aiLoading || (aiScope === "single" && !selectedFilePath)}
-                    placeholder={
-                      aiScope === "project"
-                        ? selectedProjectFiles.length > 0
-                          ? `提问勾选的 ${selectedProjectFiles.length} 个文件...`
-                          : "提问或一键全盘检索整个项目..."
-                        : selectedFilePath
-                        ? "关于此文件你有什么疑问？..."
-                        : "请先选择需要分析的文件"
-                    }
-                    value={customPrompt}
-                    onChange={(e) => setCustomPrompt(e.target.value)}
-                    className="flex-1 px-2.5 py-1.5 bg-[#020617] border border-[#1F2937] rounded text-slate-200 text-xs focus:outline-none focus:border-blue-500/50 disabled:opacity-50 placeholder-slate-700 font-mono"
-                  />
-                  <button
-                    type="submit"
-                    disabled={aiLoading || (aiScope === "single" && !selectedFilePath) || !customPrompt.trim()}
-                    className="px-2.5 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800 disabled:text-slate-600 text-white font-bold font-mono text-[10px] rounded cursor-pointer transition-colors"
-                  >
-                    Ask
-                  </button>
                 </form>
               </div>
-            </div>
-          )}
 
-          {/* TAB 2: CODE BOILERPLATE TEMPLATE PORTAL */}
-          {activeTab === "template" && (
-            <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-[#030712]">
-              <div className="space-y-1">
-                <h3 className="text-xs font-bold text-slate-300 font-mono">Boilerplate Repository (沙箱极速模版仓库)</h3>
-                <p className="text-[10px] text-slate-500 leading-normal">
-                  我们为您精心预制了适用于自动化任务执行的工程脚本模版，点击一键注入代码编辑器并开始运行或二次开发。
-                </p>
-              </div>
-
-              <div className="space-y-2.5">
-                {templates.map((tpl) => (
-                  <div
-                    key={tpl.name}
-                    className="p-3 rounded border border-[#1F2937] bg-[#0A0F1D]/50 hover:bg-[#0A0F1D]/90 transition-all flex flex-col justify-between gap-2.5"
-                  >
-                    <div className="space-y-1">
-                      <span className="text-[10px] font-mono font-bold text-purple-400 block">{tpl.filename}</span>
-                      <h4 className="text-xs font-bold text-slate-200">{tpl.name}</h4>
-                      <p className="text-[10px] text-slate-500 leading-normal">{tpl.description}</p>
-                    </div>
-                    <button
-                      onClick={() => handleApplyTemplate(tpl)}
-                      className="py-1 px-2.5 bg-purple-950/20 hover:bg-purple-950/50 border border-purple-500/20 hover:border-purple-500/40 text-purple-400 text-[10px] font-bold font-mono uppercase rounded transition-all cursor-pointer flex items-center justify-center gap-1"
-                    >
-                      <ArrowRight className="w-3 h-3" />
-                      <span>载入该模版代码</span>
-                    </button>
+              {/* Inner Right Pane: Editor (Span 8) */}
+              <div className="md:col-span-8 flex flex-col h-full overflow-hidden bg-[#020617]">
+                {/* Editor Toolbar Header */}
+                <div className="p-2 border-b border-[#1F2937] bg-[#111827]/60 flex items-center justify-between shrink-0">
+                  <div className="flex items-center gap-1.5 overflow-hidden">
+                    <span className="font-mono text-[10px] text-slate-400 truncate max-w-[200px]" title={selectedFilePath || ""}>
+                      {selectedFilePath ? `File: ${selectedFilePath}` : "No file selected"}
+                    </span>
+                    {isDirty && (
+                      <span className="w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse shrink-0" title="未保存的修改" />
+                    )}
                   </div>
-                ))}
+                  <div className="flex items-center gap-1.5 select-none">
+                    {selectedFilePath && (
+                      <>
+                        {!isImageFile(selectedFilePath) && (
+                          <button
+                            onClick={() => setIsEditing(!isEditing)}
+                            className="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded text-[9px] font-mono font-bold uppercase cursor-pointer"
+                          >
+                            {isEditing ? "View" : "Edit"}
+                          </button>
+                        )}
+                        {(isEditing || isDirty) && (
+                          <button
+                            onClick={handleSaveFile}
+                            disabled={saveStatus === "saving"}
+                            className="px-2 py-0.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-[9px] font-mono font-bold uppercase rounded cursor-pointer"
+                          >
+                            {saveStatus === "saving" ? "Saving..." : "Save"}
+                          </button>
+                        )}
+                      </>
+                    )}
+                  </div>
+                </div>
+
+                {/* Editor Body */}
+                <div className="flex-1 overflow-hidden relative text-slate-300 select-text">
+                  {selectedFilePath ? (
+                    isImageFile(selectedFilePath) ? (
+                      <div className="w-full h-full flex flex-col items-center justify-center p-4 bg-black/40 overflow-auto">
+                        <img
+                          src={`/api/workspace/image?path=${encodeURIComponent(selectedFilePath)}`}
+                          alt={selectedFilePath}
+                          className="max-w-full max-h-[250px] object-contain rounded border border-[#1F2937] shadow-xl bg-black"
+                        />
+                        <span className="text-[10px] text-slate-500 mt-2 font-mono">{selectedFilePath}</span>
+                      </div>
+                    ) : isMarkdownFile(selectedFilePath) && !isEditing ? (
+                      <div className="w-full h-full p-4 overflow-y-auto custom-scrollbar bg-[#030712] markdown-body text-xs leading-relaxed space-y-2">
+                        <Markdown>{fileContent || "*这是一个空文件*"}</Markdown>
+                      </div>
+                    ) : isJsonFile(selectedFilePath) && !isEditing ? (
+                      <div className="w-full h-full p-4 overflow-y-auto custom-scrollbar font-mono text-xs text-blue-300 bg-[#030712] leading-relaxed">
+                        <pre className="whitespace-pre-wrap">
+                          {(() => {
+                            try {
+                              return JSON.stringify(JSON.parse(fileContent), null, 2);
+                            } catch (e) {
+                              return fileContent || "// 空的 JSON 数据或解析失败";
+                            }
+                          })()}
+                        </pre>
+                      </div>
+                    ) : isEditing ? (
+                      <textarea
+                        value={fileContent}
+                        onChange={(e) => setFileContent(e.target.value)}
+                        className="w-full h-full p-3 font-mono text-xs bg-transparent text-slate-300 border-none outline-none focus:ring-0 resize-none leading-relaxed select-text overflow-y-auto custom-scrollbar"
+                        spellCheck={false}
+                      />
+                    ) : (
+                      <pre className="w-full h-full p-3 font-mono text-xs overflow-y-auto custom-scrollbar leading-relaxed whitespace-pre-wrap text-slate-400 bg-transparent select-text">
+                        {fileContent || <span className="text-slate-600 italic">// Empty file</span>}
+                      </pre>
+                    )
+                  ) : (
+                    <div className="w-full h-full flex flex-col items-center justify-center p-8 text-center text-slate-600">
+                      <FileText className="w-8 h-8 mb-2 text-slate-800 animate-bounce" />
+                      <h4 className="text-[11px] uppercase font-mono tracking-wider font-bold">请选择工作区开发文件</h4>
+                      <p className="text-[9px] text-slate-700 max-w-[200px] mt-1">
+                        在左侧小树上双击一个文件，以进入代码浏览或编辑状态。
+                      </p>
+                    </div>
+                  )}
+
+                  {/* Save feedback indicator */}
+                  {saveStatus === "saved" && (
+                    <div className="absolute top-2 right-2 bg-emerald-600 text-white text-[9px] font-mono font-bold px-2 py-0.5 rounded shadow animate-in fade-in duration-150">
+                      ✓ SAVED
+                    </div>
+                  )}
+                  {saveStatus === "error" && (
+                    <div className="absolute top-2 right-2 bg-rose-600 text-white text-[9px] font-mono font-bold px-2 py-0.5 rounded shadow animate-in fade-in duration-150">
+                      ⚠️ ERR
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* TAB CONTENT: 3. INDEXER MAP EXPLORER */}
+          {rightTab === "index" && (
+            <div className="flex-1 flex flex-col overflow-hidden bg-[#020617] p-4 text-slate-300 select-text">
+              {/* Indexer Toolbar */}
+              <div className="flex items-center gap-2 mb-4 shrink-0 select-none">
+                <div className="relative flex-1">
+                  <Search className="absolute left-2 top-2.5 w-3.5 h-3.5 text-slate-500" />
+                  <input
+                    type="text"
+                    placeholder="输入符号、类或函数名称搜索 (e.g., compile_applet, reindex)..."
+                    value={indexerQuery}
+                    onChange={(e) => setIndexerQuery(e.target.value)}
+                    className="w-full pl-8 pr-3 py-1.5 bg-[#0F172A] border border-[#1F2937] rounded text-xs text-slate-300 outline-none font-mono"
+                  />
+                </div>
+                <button
+                  onClick={handleReindex}
+                  disabled={indexerLoading}
+                  className="px-3 py-1.5 bg-purple-950/40 hover:bg-purple-900/60 text-purple-400 border border-purple-500/20 text-xs font-mono font-bold uppercase rounded cursor-pointer transition-colors flex items-center gap-1.5"
+                >
+                  <RefreshCw className={`w-3 h-3 ${indexerLoading ? "animate-spin" : ""}`} />
+                  <span>重建索引</span>
+                </button>
+              </div>
+
+              {/* Statistics Grid */}
+              <div className="grid grid-cols-2 gap-3 mb-4 shrink-0 select-none">
+                <div className="p-2.5 bg-[#0A0F1D]/50 border border-[#1F2937] rounded-lg text-center font-mono">
+                  <span className="text-[9px] text-slate-500 block uppercase">已索引的文件总数</span>
+                  <span className="text-xl font-bold text-blue-400">{files.length}</span>
+                </div>
+                <div className="p-2.5 bg-[#0A0F1D]/50 border border-[#1F2937] rounded-lg text-center font-mono">
+                  <span className="text-[9px] text-slate-500 block uppercase">发现的核心代码符号</span>
+                  <span className="text-xl font-bold text-purple-400">{indexerSymbols.length}</span>
+                </div>
+              </div>
+
+              {/* Symbols Match List */}
+              <div className="flex-1 overflow-y-auto custom-scrollbar space-y-2 pr-1">
+                {indexerLoading ? (
+                  <div className="text-center py-12 text-xs font-mono text-slate-500 animate-pulse">
+                    🔍 正在全盘检索依赖，请稍等...
+                  </div>
+                ) : indexerSymbols.length === 0 ? (
+                  <div className="text-center py-12 text-xs font-mono text-slate-500">
+                    💡 未检索到任何匹配的代码符号（输入检索词或点击上方 重建索引 按钮）
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 gap-2">
+                    {indexerSymbols.map((sym, idx) => (
+                      <div
+                        key={idx}
+                        onClick={() => {
+                          setRightTab("code");
+                          handleFileClick(sym.filePath);
+                        }}
+                        className="p-2.5 bg-[#0A0B0E]/80 border border-[#1F2937] rounded-lg flex items-center justify-between gap-3 cursor-pointer hover:border-purple-500/30 transition-colors select-none"
+                      >
+                        <div className="flex items-center gap-2 overflow-hidden">
+                          <span className={`px-1.5 py-0.5 rounded text-[8px] font-bold uppercase tracking-wider shrink-0 font-mono ${
+                            sym.type === "class" ? "bg-blue-950/40 text-blue-400 border border-blue-900/40" :
+                            sym.type === "function" ? "bg-emerald-950/40 text-emerald-400 border border-emerald-900/40" :
+                            "bg-slate-900 text-slate-400 border border-slate-800"
+                          }`}>
+                            {sym.type}
+                          </span>
+                          <span className="font-mono text-xs font-bold text-slate-200 truncate" title={sym.name}>
+                            {sym.name}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-1 text-[9px] text-slate-500 font-mono shrink-0">
+                          <span className="truncate max-w-[120px]">{sym.filePath.split("/").pop()}</span>
+                          <span>:</span>
+                          <span>{sym.line} 行</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
           )}
         </div>
-      )}
-
-      {/* 4. RESTRICTED TERMINAL WINDOW & QUICK PRESETS (Bottom Panel - Span 12) */}
-      <div className="lg:col-span-12 bg-[#020617] border border-[#1F2937] rounded overflow-hidden shadow-2xl h-[200px] flex flex-col">
-        {/* Terminal Header */}
-        <div className="p-2.5 bg-[#111827] border-b border-[#1F2937] flex flex-wrap items-center justify-between gap-2">
-          <div className="flex items-center gap-1.5">
-            <Terminal className="w-4 h-4 text-blue-400 shrink-0" />
-            <h3 className="font-bold text-slate-400 text-[10px] uppercase font-mono tracking-widest">
-              Sandbox Shell Console (受限执行沙箱)
-            </h3>
-          </div>
-
-          {/* Quick command execution badges */}
-          <div className="flex flex-wrap items-center gap-1.5">
-            <span className="text-[9px] font-mono font-bold text-slate-600 uppercase">Quick Command:</span>
-            <button
-              onClick={() => runTerminalCommand("ls -la")}
-              disabled={executingCmd}
-              className="px-1.5 py-0.5 bg-slate-800 hover:bg-slate-700 border border-slate-700/50 text-slate-300 font-mono text-[9px] rounded transition-colors cursor-pointer"
-            >
-              ls -la
-            </button>
-            <button
-              onClick={() => runTerminalCommand("python3 --version && node -v")}
-              disabled={executingCmd}
-              className="px-1.5 py-0.5 bg-slate-800 hover:bg-slate-700 border border-slate-700/50 text-slate-300 font-mono text-[9px] rounded transition-colors cursor-pointer"
-            >
-              env-check
-            </button>
-            <button
-              onClick={() => runTerminalCommand("pip list")}
-              disabled={executingCmd}
-              className="px-1.5 py-0.5 bg-slate-800 hover:bg-slate-700 border border-slate-700/50 text-slate-300 font-mono text-[9px] rounded transition-colors cursor-pointer"
-            >
-              pip list
-            </button>
-            <button
-              onClick={() => runTerminalCommand("du -sh *")}
-              disabled={executingCmd}
-              className="px-1.5 py-0.5 bg-slate-800 hover:bg-slate-700 border border-slate-700/50 text-slate-300 font-mono text-[9px] rounded transition-colors cursor-pointer"
-            >
-              du -sh
-            </button>
-            <button
-              onClick={() => setTerminalOutput("")}
-              className="px-1.5 py-0.5 bg-slate-900 hover:bg-slate-800 text-slate-500 hover:text-slate-300 font-mono text-[9px] rounded transition-colors cursor-pointer"
-            >
-              Clear Screen
-            </button>
-          </div>
-        </div>
-        
-        {/* Scrollable output area */}
-        <div className="flex-1 p-3 overflow-y-auto font-mono text-[11px] text-slate-400 bg-black/60 space-y-1 select-text">
-          {terminalOutput ? (
-            <pre className="whitespace-pre-wrap">{terminalOutput}</pre>
-          ) : (
-            <p className="text-slate-600 text-[10px] leading-normal">
-              # 受限执行沙箱终端控制台已准备就绪。<br />
-              # 运行安全策略保护系统层，越权读写或高危网络破坏会被安全组件自动熔断和捕获。<br />
-              # 试运行一个指令吧，您可以点击上方的常用快捷按键 (如 'ls -la' 查看目录物理状态)。
-            </p>
-          )}
-        </div>
-
-        {/* Console command submit form */}
-        <form onSubmit={handleRunTerminalForm} className="flex border-t border-[#1F2937]">
-          <span className="p-2 bg-[#111827] text-blue-400 font-mono text-xs select-none flex items-center border-r border-[#1F2937]">
-            $
-          </span>
-          <input
-            type="text"
-            disabled={executingCmd}
-            placeholder={executingCmd ? "指令运行中..." : "输入要在沙箱中运行的 Linux 终端指令，按回车执行..."}
-            value={manualCommand}
-            onChange={(e) => setManualCommand(e.target.value)}
-            className="flex-1 px-3 py-2 bg-[#020617]/30 text-emerald-400 font-mono text-xs border-none outline-none focus:ring-0 placeholder-slate-800"
-          />
-          <button
-            type="submit"
-            disabled={executingCmd}
-            className="px-4 bg-[#111827] hover:bg-slate-800 text-slate-300 hover:text-white border-l border-[#1F2937] flex items-center justify-center cursor-pointer transition-colors"
-          >
-            <Play className={`w-3.5 h-3.5 fill-current text-blue-400 ${executingCmd ? "animate-pulse" : ""}`} />
-          </button>
-        </form>
       </div>
 
       {/* CUSTOM CONFIRM/ALERT DIALOG MODAL */}

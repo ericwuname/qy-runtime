@@ -682,7 +682,7 @@ Cannot read properties of undefined (reading 'map')`}
             </div>
 
             {/* Right Column: Parsing & Diagnosis Display */}
-            <div className="flex flex-col h-full overflow-y-auto p-3 space-y-4 bg-[#020617]" id="analyzer-results-scrollable">
+            <div className="flex flex-col h-full overflow-y-auto custom-scrollbar p-3 space-y-4 bg-[#020617]" id="analyzer-results-scrollable">
               {!parsedData ? (
                 <div className="h-full flex flex-col items-center justify-center text-center p-8 text-slate-650 font-mono">
                   <FileText className="w-12 h-12 mb-3 text-slate-800 animate-pulse" />
@@ -753,7 +753,7 @@ Cannot read properties of undefined (reading 'map')`}
                         未能在日志中匹配到特定本地代码路径。可能是依赖安装、第三方网络请求等全局环境问题。
                       </p>
                     ) : (
-                      <div className="space-y-1.5 max-h-[160px] overflow-y-auto pr-1">
+                      <div className="space-y-1.5 max-h-[160px] overflow-y-auto custom-scrollbar pr-1">
                         {parsedData.files.map((file, idx) => (
                           <div key={idx} className="flex items-start gap-2 p-2 bg-[#0A0B0E]/80 border border-[#1F2937]/60 rounded font-mono text-xs text-slate-300">
                             <FileWarning className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
@@ -828,7 +828,7 @@ Cannot read properties of undefined (reading 'map')`}
                     )}
 
                     {aiAnalysis && (
-                      <div className="p-3.5 bg-[#090D1A] border border-[#1e293b] rounded-md font-sans text-xs text-slate-300 leading-relaxed select-text space-y-2 markdown-body overflow-y-auto max-h-[300px]">
+                      <div className="p-3.5 bg-[#090D1A] border border-[#1e293b] rounded-md font-sans text-xs text-slate-300 leading-relaxed select-text space-y-2 markdown-body overflow-y-auto custom-scrollbar max-h-[300px]">
                         <ReactMarkdown>{aiAnalysis}</ReactMarkdown>
                       </div>
                     )}

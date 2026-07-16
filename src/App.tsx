@@ -6,6 +6,7 @@ import WorkspaceManager from "./components/WorkspaceManager";
 import AIConfigManager from "./components/AIConfigManager";
 import ErrorAnalyzer from "./components/ErrorAnalyzer";
 import ErrorBoundary from "./components/ErrorBoundary";
+import SandboxTerminal from "./components/SandboxTerminal";
 import { 
   Cpu, 
   Terminal, 
@@ -24,7 +25,7 @@ import {
 export default function App() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<"monitor" | "workspace" | "config" | "error_analyzer">("monitor");
+  const [activeTab, setActiveTab] = useState<"monitor" | "workspace" | "sandbox_terminal" | "config" | "error_analyzer">("monitor");
   const [pollingActive, setPollingActive] = useState(false);
   const [aiConfig, setAiConfig] = useState<AIConfig | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -393,7 +394,7 @@ export default function App() {
               }`}
             >
               <Activity className="w-3.5 h-3.5" />
-              [01] MONITORING CENTER (监控台)
+              [01] MONITORING (监控台)
             </button>
             <button
               onClick={() => setActiveTab("workspace")}
@@ -404,7 +405,18 @@ export default function App() {
               }`}
             >
               <Terminal className="w-3.5 h-3.5" />
-              [02] SANDBOX WORKSPACE (工作区)
+              [02] WORKSPACE (工作区)
+            </button>
+            <button
+              onClick={() => setActiveTab("sandbox_terminal")}
+              className={`px-3 py-1 text-xs font-mono rounded transition-all cursor-pointer flex items-center gap-1.5 border ${
+                activeTab === "sandbox_terminal"
+                  ? "bg-blue-600/10 border-blue-500/50 text-blue-400 font-bold"
+                  : "text-slate-400 border-transparent hover:text-slate-200 hover:bg-slate-900"
+              }`}
+            >
+              <Cpu className="w-3.5 h-3.5 text-emerald-400" />
+              [03] SANDBOX CONSOLE (受限沙箱执行)
             </button>
             <button
               onClick={() => setActiveTab("config")}
@@ -415,7 +427,7 @@ export default function App() {
               }`}
             >
               <Settings className="w-3.5 h-3.5" />
-              [03] AI ENGINE CONFIG (模型池)
+              [04] ENGINE CONFIG (模型池)
             </button>
             <button
               onClick={() => setActiveTab("error_analyzer")}
@@ -426,7 +438,7 @@ export default function App() {
               }`}
             >
               <FileWarning className="w-3.5 h-3.5 text-red-400" />
-              [04] ERROR ANALYZER (报错解析)
+              [05] ERROR ANALYZER (报错解析)
             </button>
           </div>
 
@@ -594,6 +606,12 @@ export default function App() {
             <div className="h-full">
               <ErrorBoundary fallbackTitle="WORKSPACE MANAGER FAULT (工作区管理器故障)">
                 <WorkspaceManager />
+              </ErrorBoundary>
+            </div>
+          ) : activeTab === "sandbox_terminal" ? (
+            <div className="h-full">
+              <ErrorBoundary fallbackTitle="SANDBOX SHELL FAULT (沙箱执行故障)">
+                <SandboxTerminal />
               </ErrorBoundary>
             </div>
           ) : activeTab === "config" ? (

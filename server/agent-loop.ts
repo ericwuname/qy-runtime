@@ -4,7 +4,7 @@ import os from "os";
 import { safePath, checkDangerousCommand } from "./security";
 import { loadAIConfig } from "./config";
 import { saveTasks, getWorkspaceFileMtimes } from "./persistence";
-import { callAIProvider, getBackupProvider } from "./providers";
+import { callAIProvider, getBackupProvider, getBackupProviders } from "./providers";
 import { executeTool, simplifyPayload } from "./tools";
 
 const WORKSPACE_DIR = path.resolve(process.cwd(), "workspace");
@@ -180,39 +180,43 @@ export async function executeTaskBackground(task: any, activeTasks: any[]): Prom
           /network/i.test(callErrorMsg);
 
         if (isProviderError) {
-          const backup = getBackupProvider(currentProvider, currentConfig);
-          if (backup) {
+          const backups = getBackupProviders(currentProvider, currentConfig);
+          for (const backup of backups) {
             task.logs.push({
               timestamp: new Date().toISOString(),
               type: "system",
-              message: `[灾备切换] 供应商 ${currentProvider.toUpperCase()} 连续呼叫报错 (${callErrorMsg})。系统自动激活高可用应急预案，切换至备用供应商 ${backup.name.toUpperCase()} (模型: ${backup.model}) 重新尝试当前步骤！`
+              message: `[灾备切换] 供应商 ${currentProvider.toUpperCase()} 呼叫报错 (${callErrorMsg})。系统自动激活高可用应急预案，尝试切换至备用供应商 ${backup.name.toUpperCase()} (模型: ${backup.model}) 重新尝试当前步骤！`
             });
             saveTasks(activeTasks);
 
-            currentProvider = backup.name;
-            currentModel = backup.model;
+            let tempProvider = backup.name;
+            let tempModel = backup.model;
 
-            if ((currentProvider === "agnes" || currentProvider === "agnesai" || currentProvider.toLowerCase().includes("agnes") || currentModel.toLowerCase().includes("agnes-video") || currentModel.toLowerCase().includes("agnes-image")) && (currentModel.toLowerCase().includes("image") || currentModel.toLowerCase().includes("video"))) {
-              currentModel = "agnes-2.0-flash";
-            } else if (currentProvider === "openai" && (currentModel.toLowerCase().includes("dall-e") || currentModel.toLowerCase().includes("dalle"))) {
-              currentModel = "gpt-4o-mini";
-            } else if (currentProvider === "gemini" && (currentModel.toLowerCase().includes("imagen") || currentModel.toLowerCase().includes("media"))) {
-              currentModel = "gemini-1.5-flash";
+            if ((tempProvider === "agnes" || tempProvider === "agnesai" || tempProvider.toLowerCase().includes("agnes") || tempModel.toLowerCase().includes("agnes-video") || tempModel.toLowerCase().includes("agnes-image")) && (tempModel.toLowerCase().includes("image") || tempModel.toLowerCase().includes("video"))) {
+              tempModel = "agnes-2.0-flash";
+            } else if (tempProvider === "openai" && (tempModel.toLowerCase().includes("dall-e") || tempModel.toLowerCase().includes("dalle"))) {
+              tempModel = "gpt-4o-mini";
+            } else if (tempProvider === "gemini" && (tempModel.toLowerCase().includes("imagen") || tempModel.toLowerCase().includes("media"))) {
+              tempModel = "gemini-1.5-flash";
             }
 
             let backupAttempt = 0;
             const backupMaxAttempts = 3;
-            while (backupAttempt < backupMaxAttempts && !success) {
+            let backupSuccess = false;
+            while (backupAttempt < backupMaxAttempts && !backupSuccess) {
               try {
                 response = await callAIProvider(
-                  currentProvider,
-                  currentModel,
+                  tempProvider,
+                  tempModel,
                   history,
                   task.parameters?.temperature ?? 0.2,
                   finalSystemInstruction,
                   currentConfig
                 );
+                backupSuccess = true;
                 success = true;
+                currentProvider = tempProvider;
+                currentModel = tempModel;
                 task.logs.push({
                   timestamp: new Date().toISOString(),
                   type: "system",
@@ -228,12 +232,15 @@ export async function executeTaskBackground(task: any, activeTasks: any[]): Prom
                   task.logs.push({
                     timestamp: new Date().toISOString(),
                     type: "system",
-                    message: `[备用自动重试] 备用供应商 ${currentProvider.toUpperCase()} 呼叫报错 (${backupErrStr})。将在 ${Math.round(delay)}ms 后重试 (${backupAttempt}/${backupMaxAttempts - 1})...`
+                    message: `[备用自动重试] 备用供应商 ${tempProvider.toUpperCase()} 呼叫报错 (${backupErrStr})。将在 ${Math.round(delay)}ms 后重试 (${backupAttempt}/${backupMaxAttempts - 1})...`
                   });
                   saveTasks(activeTasks);
                   await new Promise(resolve => setTimeout(resolve, delay));
                 }
               }
+            }
+            if (backupSuccess) {
+              break;
             }
           }
         }
@@ -763,39 +770,43 @@ export async function resumeTaskBackground(task: any, activeTasks: any[]): Promi
           /network/i.test(callErrorMsg);
 
         if (isProviderError) {
-          const backup = getBackupProvider(currentProvider, currentConfig);
-          if (backup) {
+          const backups = getBackupProviders(currentProvider, currentConfig);
+          for (const backup of backups) {
             task.logs.push({
               timestamp: new Date().toISOString(),
               type: "system",
-              message: `[灾备切换] 供应商 ${currentProvider.toUpperCase()} 连续呼叫报错 (${callErrorMsg})。系统自动激活高可用应急预案，切换至备用供应商 ${backup.name.toUpperCase()} (模型: ${backup.model}) 重新尝试当前步骤！`
+              message: `[灾备切换] 供应商 ${currentProvider.toUpperCase()} 呼叫报错 (${callErrorMsg})。系统自动激活高可用应急预案，尝试切换至备用供应商 ${backup.name.toUpperCase()} (模型: ${backup.model}) 重新尝试当前步骤！`
             });
             saveTasks(activeTasks);
 
-            currentProvider = backup.name;
-            currentModel = backup.model;
+            let tempProvider = backup.name;
+            let tempModel = backup.model;
 
-            if ((currentProvider === "agnes" || currentProvider === "agnesai" || currentProvider.toLowerCase().includes("agnes") || currentModel.toLowerCase().includes("agnes-video") || currentModel.toLowerCase().includes("agnes-image")) && (currentModel.toLowerCase().includes("image") || currentModel.toLowerCase().includes("video"))) {
-              currentModel = "agnes-2.0-flash";
-            } else if (currentProvider === "openai" && (currentModel.toLowerCase().includes("dall-e") || currentModel.toLowerCase().includes("dalle"))) {
-              currentModel = "gpt-4o-mini";
-            } else if (currentProvider === "gemini" && (currentModel.toLowerCase().includes("imagen") || currentModel.toLowerCase().includes("media"))) {
-              currentModel = "gemini-1.5-flash";
+            if ((tempProvider === "agnes" || tempProvider === "agnesai" || tempProvider.toLowerCase().includes("agnes") || tempModel.toLowerCase().includes("agnes-video") || tempModel.toLowerCase().includes("agnes-image")) && (tempModel.toLowerCase().includes("image") || tempModel.toLowerCase().includes("video"))) {
+              tempModel = "agnes-2.0-flash";
+            } else if (tempProvider === "openai" && (tempModel.toLowerCase().includes("dall-e") || tempModel.toLowerCase().includes("dalle"))) {
+              tempModel = "gpt-4o-mini";
+            } else if (tempProvider === "gemini" && (tempModel.toLowerCase().includes("imagen") || tempModel.toLowerCase().includes("media"))) {
+              tempModel = "gemini-1.5-flash";
             }
 
             let backupAttempt = 0;
             const backupMaxAttempts = 3;
-            while (backupAttempt < backupMaxAttempts && !success) {
+            let backupSuccess = false;
+            while (backupAttempt < backupMaxAttempts && !backupSuccess) {
               try {
                 response = await callAIProvider(
-                  currentProvider,
-                  currentModel,
+                  tempProvider,
+                  tempModel,
                   history,
                   task.parameters?.temperature ?? 0.2,
                   finalSystemInstruction,
                   currentConfig
                 );
+                backupSuccess = true;
                 success = true;
+                currentProvider = tempProvider;
+                currentModel = tempModel;
                 task.logs.push({
                   timestamp: new Date().toISOString(),
                   type: "system",
@@ -811,12 +822,15 @@ export async function resumeTaskBackground(task: any, activeTasks: any[]): Promi
                   task.logs.push({
                     timestamp: new Date().toISOString(),
                     type: "system",
-                    message: `[备用自动重试] 备用供应商 ${currentProvider.toUpperCase()} 呼叫报错 (${backupErrStr})。将在 ${Math.round(delay)}ms 后重试 (${backupAttempt}/${backupMaxAttempts - 1})...`
+                    message: `[备用自动重试] 备用供应商 ${tempProvider.toUpperCase()} 呼叫报错 (${backupErrStr})。将在 ${Math.round(delay)}ms 后重试 (${backupAttempt}/${backupMaxAttempts - 1})...`
                   });
                   saveTasks(activeTasks);
                   await new Promise(resolve => setTimeout(resolve, delay));
                 }
               }
+            }
+            if (backupSuccess) {
+              break;
             }
           }
         }

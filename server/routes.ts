@@ -8,6 +8,7 @@ import { loadAIConfig, saveAIConfig, diagnoseFetchError, maskConfigKeys, mergeSu
 import { saveTasks, getDiskUsagePercent, getFileTree, loadChatSessions, saveChatSessions } from "./persistence";
 import { callAIProvider, getBackupProvider } from "./providers";
 import { executeTaskBackground, resumeTaskBackground } from "./agent-loop";
+import { getRepoIndex, reindexWorkspace, searchSymbols } from "./repo-indexer";
 
 const WORKSPACE_DIR = path.resolve(process.cwd(), "workspace");
 
@@ -641,6 +642,35 @@ export function registerRoutes(app: express.Express, getActiveTasks: () => any[]
     }
     
     res.status(400).json({ error: "Provider not found in configurations" });
+  });
+
+  // Repo Indexer APIs
+  app.get("/api/indexer/status", async (req, res) => {
+    try {
+      const index = await getRepoIndex();
+      res.json({ success: true, index });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/indexer/reindex", async (req, res) => {
+    try {
+      const index = await reindexWorkspace();
+      res.json({ success: true, index });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get("/api/indexer/symbols", async (req, res) => {
+    try {
+      const query = (req.query.q as string) || "";
+      const symbols = await searchSymbols(query);
+      res.json({ success: true, symbols });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
   });
 
   app.post("/api/analyze-error", async (req, res) => {
@@ -1500,6 +1530,13 @@ ${fileContent}
       const providerName = currentConfig.activeProvider || "gemini";
       const modelName = currentConfig.activeModel || "gemini-3.5-flash";
 
+      const repoIndex = await getRepoIndex();
+      const repoIndexSummary = `\n--- 仓库及代码符号发现（Codebase Index） ---
+当前工作区共包含 ${repoIndex.totalFiles} 个文件，已提取 ${repoIndex.totalSymbols} 个关键类/函数等符号。
+部分核心文件: ${repoIndex.files.slice(0, 30).join(", ")}${repoIndex.files.length > 30 ? "...(等)" : ""}
+部分提取的代码符号:
+${repoIndex.symbols.slice(0, 15).map(s => `- [${s.type.toUpperCase()}] \`${s.name}\` (在 ${s.filePath}:${s.line} 行)`).join("\n")}${repoIndex.symbols.length > 15 ? "\n...(更多符号略)" : ""}`;
+
       let originalText = "";
       let hasActions = true;
       let loopCount = 0;
@@ -1534,6 +1571,20 @@ Rules:
 - You can execute MULTIPLE actions in one response. They will be executed sequentially.
 - If you execute a command or write a file, the execution result (stdout, success/failure) will be fed back to you in the next turn as a [System Execution Result]. You should observe this output and continue executing more actions if needed (e.g. if there's a compilation error, write a fix and run again), or write your final response/report if you are done.
 - When you are completely done with the task and no more actions are needed, simply write your final response to the user without generating any more <workspace_action> tags.
+
+作为类似 Codex CLI 的自主执行 Agent，你必须遵循以下核心开发原则：
+1. **规划与执行分离 (Plan before Action)**:
+   - 收到用户的任务后，请优先生成一个详细的步骤规划并输出。步骤规划应该清晰、紧凑。格式如下：
+     - **📋 任务规划方案 (Task Step-by-Step Plan)**:
+       1. [PLANNING]: 任务分析和符号依赖检索。
+       2. [DESIGN]: 设计方案和涉及文件接口。
+       3. [EXECUTION]: 具体的代码编写、构建编译及运行测试。
+       4. [SUMMARY]: 输出验证和自愈测试总结。
+2. **安全自愈循环 (Self-Healing Loop)**:
+   - 严禁在遇到运行报错、编译失败、语法错误时立即妥协，你拥有完全自愈的能力！
+   - 请结合报错的 Traceback、Linter 提示或 Stderr 输出，精确找到缺陷代码行，并自动规划修复代码再次覆盖写入，重新运行指令或测试验证，直到完美解决问题！
+
+${repoIndexSummary}
 
 以下是用户当前沙箱中最新的开发文件上下文：
 ${activeFileContext}
