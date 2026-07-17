@@ -6,7 +6,7 @@ import dns from "dns";
 import { safePath, checkDangerousCommand, isValidPublicUrl } from "./security";
 import { loadAIConfig, saveAIConfig, diagnoseFetchError, maskConfigKeys, mergeSubmittedConfig } from "./config";
 import { saveTasks, getDiskUsagePercent, getFileTree, loadChatSessions, saveChatSessions } from "./persistence";
-import { callAIProvider, getBackupProvider } from "./providers";
+import { callAIProvider, getBackupProvider, getBackupProviders } from "./providers";
 import { executeTaskBackground, resumeTaskBackground } from "./agent-loop";
 import { getRepoIndex, reindexWorkspace, searchSymbols } from "./repo-indexer";
 
@@ -1024,6 +1024,20 @@ Do not include any system metadata. Keep it concise, helpful, and direct.`;
     }
   });
 
+  app.get("/api/workspace/raw-file", (req, res) => {
+    const { path: relPath } = req.query;
+    if (!relPath) return res.status(400).json({ error: "Missing file path" });
+    try {
+      const filePath = safePath(relPath as string);
+      if (!fs.existsSync(filePath)) {
+        return res.status(404).json({ error: "File not found" });
+      }
+      res.sendFile(filePath);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   app.post("/api/workspace/write", (req, res) => {
     const { path: relPath, content } = req.body;
     if (!relPath || content === undefined) {
@@ -1215,6 +1229,25 @@ Do not include any system metadata. Keep it concise, helpful, and direct.`;
       }
       saveChatSessions(sessions);
       res.json({ success: true, message: "Session deleted" });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/workspace/chat-sessions/:id/messages/raw", (req, res) => {
+    try {
+      const { id } = req.params;
+      const { messages, title } = req.body;
+      const sessions = loadChatSessions();
+      const session = sessions.find(s => s.id === id);
+      if (!session) {
+        return res.status(404).json({ error: "Session not found" });
+      }
+      if (messages !== undefined) session.messages = messages;
+      if (title !== undefined) session.title = title;
+      session.updatedAt = new Date().toISOString();
+      saveChatSessions(sessions);
+      res.json({ success: true, session });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -1550,6 +1583,11 @@ ${repoIndex.symbols.slice(0, 15).map(s => `- [${s.type.toUpperCase()}] \`${s.nam
 You have the power to actually execute actions in the user's workspace on their behalf!
 When the user asks you to write a file, create a directory, delete a file, generate reports, or run/test a command, you MUST use the following special XML-style tags to declare the actions. The backend will automatically parse and execute them for you, feed the output back to you, and allow you to continue working until the job is complete.
 
+### 重要！你必须使用结构化 XML 标签将你的【智能体思考生命周期】包裹起来：
+1. 思考与意图深剖：在每一次生成的最开头，你必须先使用 \`<thinking>\` 标签包裹你当前的深度分析、问题拆解及对上下文中文件依赖的逻辑判断。
+2. 蓝图设计与计划拆解：紧接着，你必须使用 \`<planning>\` 标签包裹你的具体执行方案、计划步骤，指明你要修改哪些文件、创建哪些脚本、运行哪些测试命令。
+3. 最终自省与质量复盘：在任务圆满完成后（没有更多 <workspace_action> 需要执行，这是最后一步输出），你必须在回答的末尾使用 \`<retrospective>\` 标签包裹你的质量自省报告。包括你成功完成了什么、踩了什么坑（比如自愈修复的过程）、下一步建议。
+
 Supported actions:
 
 1. Create or overwrite a file (write full file content inside the tags, do not omit any code):
@@ -1595,16 +1633,69 @@ ${lastExecutionOutput ? `\n【上一步系统自动执行结果反馈（请结�
           parts: m.parts
         }));
 
-        const aiResponse = await callAIProvider(
-          providerName,
-          modelName,
-          historyForProvider,
-          0.2,
-          systemInstruction,
-          currentConfig
-        );
+        let aiResponse: any = null;
+        let success = false;
+        let lastError: any = null;
+        let finalProviderUsed = providerName;
+        let finalModelUsed = modelName;
+
+        // 1. Attempt primary provider first
+        try {
+          aiResponse = await callAIProvider(
+            providerName,
+            modelName,
+            historyForProvider,
+            0.2,
+            systemInstruction,
+            currentConfig
+          );
+          success = true;
+        } catch (callErr: any) {
+          lastError = callErr;
+          console.error(`[AI Chat Main Provider Error] ${providerName} failed:`, callErr);
+        }
+
+        // 2. Dynamic Active Model Pool failover if primary provider fails
+        if (!success) {
+          const backups = getBackupProviders(providerName, currentConfig);
+          console.log(`[AI Chat Failover] Primary provider failed. Found ${backups.length} active backup providers:`, backups);
+          
+          for (const backup of backups) {
+            try {
+              console.log(`[AI Chat Failover] Seamlessly attempting backup provider: ${backup.name} (model: ${backup.model})...`);
+              aiResponse = await callAIProvider(
+                backup.name,
+                backup.model,
+                historyForProvider,
+                0.2,
+                systemInstruction,
+                currentConfig
+              );
+              finalProviderUsed = backup.name;
+              finalModelUsed = backup.model;
+              success = true;
+              break;
+            } catch (backupErr: any) {
+              console.error(`[AI Chat Failover] Backup provider ${backup.name} failed:`, backupErr);
+              lastError = backupErr;
+            }
+          }
+        }
+
+        if (!success) {
+          const errMsg = lastError?.message || String(lastError || "未知模型错误");
+          return res.status(500).json({
+            error: `智能体主模型与激活备用模型池调用全部失败。当前主供应商为 ${providerName.toUpperCase()}，错误原因: ${errMsg}。请在“模型池”配置面板中检查 API Key 余额或接口连通性。`
+          });
+        }
 
         originalText = aiResponse.text || "";
+
+        // Append a highly polished notification if backup model was activated
+        if (finalProviderUsed !== providerName) {
+          const fallbackNotice = `\n\n---\n> 💡 **防灾高可用保障**：由于主模型提供商 **${providerName.toUpperCase()}** 呼叫失败（可能因为 API Key 欠费或限流），系统已为您**动态无缝切换**至备用模型池中的激活节点：**${finalProviderUsed.toUpperCase()}** (${finalModelUsed})，保证您的开发连续不中断。`;
+          originalText += fallbackNotice;
+        }
 
         // Parse workspace action tags
         const actionTagRegex = /<workspace_action\s+([^>]+?)(?:\/>|>([\s\S]*?)<\/workspace_action>)/g;
